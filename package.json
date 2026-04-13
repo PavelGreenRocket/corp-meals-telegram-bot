@@ -1,0 +1,31 @@
+{
+  "name": "corp-meals-telegram-bot",
+  "version": "1.0.0",
+  "description": "Telegram-бот для учета корпоративного питания клиентов по авансовой схеме",
+  "main": "index.js",
+  "scripts": {
+    "start": "node src/app.js",
+    "dev": "nodemon src/app.js",
+    "db:init": "node src/db/initDb.js"
+  },
+  "keywords": [
+    "telegram",
+    "telegraf",
+    "postgresql",
+    "docx",
+    "exceljs"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "dayjs": "^1.11.13",
+    "docx": "^9.5.1",
+    "dotenv": "^16.4.5",
+    "exceljs": "^4.4.0",
+    "pg": "^8.13.1",
+    "telegraf": "^4.16.3"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.7"
+  }
+}
