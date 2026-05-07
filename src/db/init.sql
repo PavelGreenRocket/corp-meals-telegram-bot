@@ -1,3 +1,4 @@
+-- clients
 CREATE TABLE IF NOT EXISTS clients (
   id BIGSERIAL PRIMARY KEY,
   short_name TEXT NOT NULL UNIQUE,
@@ -8,6 +9,7 @@ CREATE TABLE IF NOT EXISTS clients (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- food_operations
 CREATE TABLE IF NOT EXISTS food_operations (
   id BIGSERIAL PRIMARY KEY,
   client_id BIGINT NOT NULL REFERENCES clients(id) ON UPDATE CASCADE ON DELETE RESTRICT,
@@ -19,6 +21,7 @@ CREATE TABLE IF NOT EXISTS food_operations (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- monthly_acts
 CREATE TABLE IF NOT EXISTS monthly_acts (
   id BIGSERIAL PRIMARY KEY,
   client_id BIGINT NOT NULL REFERENCES clients(id) ON UPDATE CASCADE ON DELETE RESTRICT,
@@ -29,10 +32,13 @@ CREATE TABLE IF NOT EXISTS monthly_acts (
   days_count INTEGER NOT NULL CHECK (days_count >= 0),
   total_amount NUMERIC(14, 2) NOT NULL CHECK (total_amount >= 0),
   status VARCHAR(20) NOT NULL DEFAULT 'generated',
+  signed_file_path TEXT,
+  signed_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (client_id, act_month, act_year, act_number)
 );
 
+-- reconciliation_snapshots
 CREATE TABLE IF NOT EXISTS reconciliation_snapshots (
   id BIGSERIAL PRIMARY KEY,
   client_id BIGINT NOT NULL REFERENCES clients(id) ON UPDATE CASCADE ON DELETE RESTRICT,
@@ -45,6 +51,7 @@ CREATE TABLE IF NOT EXISTS reconciliation_snapshots (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- indexes
 CREATE INDEX IF NOT EXISTS idx_clients_is_active ON clients(is_active);
 CREATE INDEX IF NOT EXISTS idx_food_operations_client_date ON food_operations(client_id, operation_date);
 CREATE INDEX IF NOT EXISTS idx_food_operations_client_type_date ON food_operations(client_id, operation_type, operation_date);
