@@ -1,5 +1,5 @@
 ﻿const pool = require("../db/pool");
-const { formatDateRu, todayIso } = require("../utils/dateHelpers");
+const { formatDateRu, getMonthRange, todayIso } = require("../utils/dateHelpers");
 const { formatAmount } = require("../utils/money");
 const {
   buildLegacyActTitle,
@@ -153,9 +153,110 @@ async function getYearlyMonthlyTotals(year) {
   };
 }
 
-async function getReconciliationPeriodBounds(documentDate = todayIso()) {
+function getPreviousMonthPeriod(documentDate = todayIso()) {
+  const normalizedDate = String(documentDate || todayIso());
+  const match = normalizedDate.match(/^(\d{4})-(\d{2})-\d{2}$/);
+  const base = match
+    ? new Date(Number(match[1]), Number(match[2]) - 1, 1)
+    : new Date();
+  const previous = new Date(base.getFullYear(), base.getMonth() - 1, 1);
+  const month = previous.getMonth() + 1;
+  const year = previous.getFullYear();
+
+  return {
+    month,
+    year,
+    ...getMonthRange(month, year)
+  };
+}
+
+function normalizeIsoDateValue(value) {
+  if (!value) {
+    return null;
+  }
+
+  if (value instanceof Date) {
+    return [
+      value.getFullYear(),
+      String(value.getMonth() + 1).padStart(2, "0"),
+      String(value.getDate()).padStart(2, "0")
+    ].join("-");
+  }
+
+  return String(value).slice(0, 10);
+}
+
+async function getUnsignedPreviousMonthActCandidate(documentDate = todayIso()) {
+  const period = getPreviousMonthPeriod(documentDate);
+  const { rows } = await pool.query(
+    `
+      SELECT
+        COALESCE(meal_totals.total_amount, 0) AS total_amount,
+        EXISTS (
+          SELECT 1
+          FROM generated_documents
+          WHERE doc_type = 'act'
+            AND signed_file_path IS NOT NULL
+            AND (
+              (period_start::DATE = $1 AND period_end::DATE = $2)
+              OR (act_year = $3 AND act_month = $4)
+            )
+        ) AS has_signed_generated_act,
+        EXISTS (
+          SELECT 1
+          FROM month_uploaded_documents
+          WHERE doc_kind = 'act'
+            AND doc_year = $3
+            AND doc_month = $4
+        ) AS has_uploaded_act,
+        (
+          SELECT document_number
+          FROM generated_documents
+          WHERE doc_type = 'act'
+            AND period_start::DATE = $1
+            AND period_end::DATE = $2
+            AND document_number ~ '^[0-9]+$'
+          ORDER BY document_number::BIGINT ASC, id ASC
+          LIMIT 1
+        ) AS document_number,
+        (
+          SELECT document_date
+          FROM generated_documents
+          WHERE doc_type = 'act'
+            AND period_start::DATE = $1
+            AND period_end::DATE = $2
+          ORDER BY signed_file_path IS NOT NULL DESC, uploaded_signed_at DESC NULLS LAST, id DESC
+          LIMIT 1
+        ) AS document_date
+      FROM (
+        SELECT COALESCE(SUM(amount), 0) AS total_amount
+        FROM meal_entries
+        WHERE meal_date BETWEEN $1 AND $2
+      ) meal_totals
+    `,
+    [period.startDate, period.endDate, period.year, period.month]
+  );
+
+  const row = rows[0] || {};
+  const totalAmount = Number(row.total_amount || 0);
+  if (totalAmount <= 0 || row.has_signed_generated_act || row.has_uploaded_act) {
+    return null;
+  }
+
+  return {
+    ...period,
+    documentNumber: row.document_number || null,
+    documentDate: normalizeIsoDateValue(row.document_date) || period.endDate,
+    totalAmount
+  };
+}
+
+async function getReconciliationPeriodBounds(documentDate = todayIso(), options = {}) {
   const normalizedDocumentDate = documentDate || todayIso();
-  const legacyStartDateCandidates = [
+  const unsignedPreviousMonth = options.includeUnsignedPreviousMonth
+    ? await getUnsignedPreviousMonthActCandidate(normalizedDocumentDate)
+    : null;
+  const legacyDateCandidates = [
     ...getLegacyAdvanceRows({ endDate: normalizedDocumentDate }).map((item) => item.date_value),
     ...getLegacyMealChargesForReconciliation(normalizedDocumentDate).map((item) => item.operationDate)
   ].sort();
@@ -165,13 +266,28 @@ async function getReconciliationPeriodBounds(documentDate = todayIso()) {
       WITH effective_acts AS (
         SELECT DISTINCT ON (act_year, act_month)
           document_date
-        FROM generated_documents
-        WHERE doc_type = 'act'
-          AND signed_file_path IS NOT NULL
-          AND document_date <= $1
+        FROM (
+          SELECT act_year, act_month, document_date, uploaded_signed_at, id
+          FROM generated_documents
+          WHERE doc_type = 'act'
+            AND signed_file_path IS NOT NULL
+            AND document_date <= $1
+          UNION ALL
+          SELECT
+            doc_year AS act_year,
+            doc_month AS act_month,
+            (make_date(doc_year, doc_month, 1) + INTERVAL '1 month - 1 day')::DATE AS document_date,
+            updated_at AS uploaded_signed_at,
+            id
+          FROM month_uploaded_documents
+          WHERE doc_kind = 'act'
+            AND (make_date(doc_year, doc_month, 1) + INTERVAL '1 month - 1 day')::DATE <= $1
+        ) acts
         ORDER BY act_year, act_month, uploaded_signed_at DESC NULLS LAST, id DESC
       )
-      SELECT MIN(operation_date) AS start_date
+      SELECT
+        MIN(operation_date) AS start_date,
+        MAX(operation_date) AS end_date
       FROM (
         SELECT payment_date AS operation_date
         FROM advances
@@ -179,37 +295,83 @@ async function getReconciliationPeriodBounds(documentDate = todayIso()) {
         UNION ALL
         SELECT document_date AS operation_date
         FROM effective_acts
+        UNION ALL
+        SELECT $2::DATE AS operation_date
+        WHERE $3::BOOLEAN
       ) history
     `,
-    [normalizedDocumentDate]
+    [normalizedDocumentDate, unsignedPreviousMonth?.documentDate || null, Boolean(unsignedPreviousMonth)]
   );
 
-  const dbStartDate = rows[0]?.start_date || null;
-  const legacyStartDate = legacyStartDateCandidates[0] || null;
+  const dbStartDate = normalizeIsoDateValue(rows[0]?.start_date);
+  const dbEndDate = normalizeIsoDateValue(rows[0]?.end_date);
+  const legacyStartDate = legacyDateCandidates[0] || null;
+  const legacyEndDate = legacyDateCandidates[legacyDateCandidates.length - 1] || null;
   const startDate = [dbStartDate, legacyStartDate].filter(Boolean).sort()[0] || normalizedDocumentDate;
+  const endDate = [dbEndDate, legacyEndDate].filter(Boolean).sort().at(-1) || normalizedDocumentDate;
 
   return {
     startDate,
-    endDate: normalizedDocumentDate
+    endDate
   };
 }
 
-async function buildReconciliationData({ startDate = null, endDate = null, documentDate = todayIso() }) {
-  const defaultPeriod = await getReconciliationPeriodBounds(documentDate);
+async function buildReconciliationData({
+  startDate = null,
+  endDate = null,
+  documentDate = todayIso(),
+  includeUnsignedPreviousMonth = false
+}) {
+  const unsignedPreviousMonth = includeUnsignedPreviousMonth
+    ? await getUnsignedPreviousMonthActCandidate(documentDate)
+    : null;
+  const defaultPeriod = await getReconciliationPeriodBounds(documentDate, { includeUnsignedPreviousMonth });
   const effectiveStartDate = startDate || defaultPeriod.startDate;
   const effectiveEndDate = endDate || defaultPeriod.endDate;
   const legacyMaxActNumber = getLegacyMaxActNumber();
 
   const openingRows = await pool.query(
       `
-        WITH effective_acts AS (
-          SELECT DISTINCT ON (period_start::DATE, period_end::DATE)
-            document_date,
-            total_amount
+        WITH uploaded_act_periods AS (
+          SELECT
+            make_date(doc_year, doc_month, 1)::DATE AS period_start,
+            (make_date(doc_year, doc_month, 1) + INTERVAL '1 month - 1 day')::DATE AS period_end
+          FROM month_uploaded_documents
+          WHERE doc_kind = 'act'
+        ),
+        unsigned_previous_month_act_period AS (
+          SELECT $2::DATE AS period_start, $3::DATE AS period_end
+          WHERE $4::BOOLEAN
+        ),
+        act_periods AS (
+          SELECT period_start, period_end FROM uploaded_act_periods
+          UNION
+          SELECT period_start::DATE, period_end::DATE
           FROM generated_documents
           WHERE doc_type = 'act'
             AND signed_file_path IS NOT NULL
-          ORDER BY period_start::DATE, period_end::DATE, uploaded_signed_at DESC NULLS LAST, id DESC
+          UNION
+          SELECT period_start, period_end FROM unsigned_previous_month_act_period
+        ),
+        effective_acts AS (
+          SELECT
+            COALESCE(generated_act.document_date, act_periods.period_end) AS document_date,
+            COALESCE(generated_act.total_amount, meal_totals.total_amount, 0) AS total_amount
+          FROM act_periods
+          LEFT JOIN LATERAL (
+            SELECT document_date, total_amount
+            FROM generated_documents
+            WHERE doc_type = 'act'
+              AND period_start::DATE = act_periods.period_start
+              AND period_end::DATE = act_periods.period_end
+            ORDER BY signed_file_path IS NOT NULL DESC, uploaded_signed_at DESC NULLS LAST, id DESC
+            LIMIT 1
+          ) generated_act ON TRUE
+          LEFT JOIN LATERAL (
+            SELECT COALESCE(SUM(amount), 0) AS total_amount
+            FROM meal_entries
+            WHERE meal_date BETWEEN act_periods.period_start AND act_periods.period_end
+          ) meal_totals ON TRUE
         )
       SELECT COALESCE(SUM(paid_delta - charged_delta), 0) AS opening_balance
       FROM (
@@ -221,7 +383,12 @@ async function buildReconciliationData({ startDate = null, endDate = null, docum
       ) operations
       WHERE doc_date < $1
     `,
-    [effectiveStartDate]
+    [
+      effectiveStartDate,
+      unsignedPreviousMonth?.startDate || null,
+      unsignedPreviousMonth?.endDate || null,
+      Boolean(unsignedPreviousMonth)
+    ]
   );
 
   const legacyOpeningPaid = getLegacyAdvanceRows({ endDate: effectiveStartDate })
@@ -246,25 +413,45 @@ async function buildReconciliationData({ startDate = null, endDate = null, docum
     ),
     pool.query(
       `
-        WITH effective_acts AS (
+        WITH uploaded_act_periods AS (
           SELECT
-            signed_acts.document_date,
+            make_date(doc_year, doc_month, 1)::DATE AS period_start,
+            (make_date(doc_year, doc_month, 1) + INTERVAL '1 month - 1 day')::DATE AS period_end
+          FROM month_uploaded_documents
+          WHERE doc_kind = 'act'
+        ),
+        unsigned_previous_month_act_period AS (
+          SELECT $4::DATE AS period_start, $5::DATE AS period_end
+          WHERE $6::BOOLEAN
+        ),
+        act_periods AS (
+          SELECT period_start, period_end FROM uploaded_act_periods
+          UNION
+          SELECT period_start::DATE, period_end::DATE
+          FROM generated_documents
+          WHERE doc_type = 'act'
+            AND signed_file_path IS NOT NULL
+          UNION
+          SELECT period_start, period_end FROM unsigned_previous_month_act_period
+        ),
+        effective_acts AS (
+          SELECT
+            COALESCE(signed_acts.document_date, act_periods.period_end) AS document_date,
             canonical_numbers.document_number,
-            signed_acts.total_amount,
-            signed_acts.period_start,
-            signed_acts.period_end
-          FROM (
-            SELECT DISTINCT ON (period_start::DATE, period_end::DATE)
-              document_date,
-              total_amount,
-              period_start::DATE AS period_start,
-              period_end::DATE AS period_end
+            COALESCE(signed_acts.total_amount, meal_totals.total_amount, 0) AS total_amount,
+            act_periods.period_start,
+            act_periods.period_end
+          FROM act_periods
+          LEFT JOIN LATERAL (
+            SELECT document_date, total_amount
             FROM generated_documents
             WHERE doc_type = 'act'
-              AND signed_file_path IS NOT NULL
-            ORDER BY period_start::DATE, period_end::DATE, uploaded_signed_at DESC NULLS LAST, id DESC
-          ) signed_acts
-          JOIN (
+              AND period_start::DATE = act_periods.period_start
+              AND period_end::DATE = act_periods.period_end
+            ORDER BY signed_file_path IS NOT NULL DESC, uploaded_signed_at DESC NULLS LAST, id DESC
+            LIMIT 1
+          ) signed_acts ON TRUE
+          LEFT JOIN LATERAL (
             SELECT DISTINCT ON (period_start::DATE, period_end::DATE)
               document_number,
               period_start::DATE AS period_start,
@@ -275,15 +462,27 @@ async function buildReconciliationData({ startDate = null, endDate = null, docum
               AND document_number::BIGINT > $3
             ORDER BY period_start::DATE, period_end::DATE, document_number::BIGINT ASC, id ASC
           ) canonical_numbers
-          ON canonical_numbers.period_start = signed_acts.period_start
-            AND canonical_numbers.period_end = signed_acts.period_end
+          ON canonical_numbers.period_start = act_periods.period_start
+            AND canonical_numbers.period_end = act_periods.period_end
+          LEFT JOIN LATERAL (
+            SELECT COALESCE(SUM(amount), 0) AS total_amount
+            FROM meal_entries
+            WHERE meal_date BETWEEN act_periods.period_start AND act_periods.period_end
+          ) meal_totals ON TRUE
         )
         SELECT document_date, document_number, total_amount, period_start, period_end
         FROM effective_acts
         WHERE document_date BETWEEN $1 AND $2
         ORDER BY document_date ASC, document_number ASC
       `,
-      [effectiveStartDate, effectiveEndDate, legacyMaxActNumber]
+      [
+        effectiveStartDate,
+        effectiveEndDate,
+        legacyMaxActNumber,
+        unsignedPreviousMonth?.startDate || null,
+        unsignedPreviousMonth?.endDate || null,
+        Boolean(unsignedPreviousMonth)
+      ]
     )
   ]);
 
@@ -304,7 +503,7 @@ async function buildReconciliationData({ startDate = null, endDate = null, docum
       paid: Number(advance.amount)
     })),
     ...advances.map((advance) => ({
-      date: advance.payment_date,
+      date: normalizeIsoDateValue(advance.payment_date),
       id: advance.id,
       paid: Number(advance.amount)
     }))
@@ -324,8 +523,10 @@ async function buildReconciliationData({ startDate = null, endDate = null, docum
   const rows = [
     ...advanceRows,
     ...acts.map((act) => ({
-      date: act.document_date,
-      document: `Акт выполненных работ № ${act.document_number} за период с ${formatDateRu(act.period_start)} по ${formatDateRu(act.period_end)}`,
+      date: normalizeIsoDateValue(act.document_date),
+      document: act.document_number
+        ? `Акт выполненных работ № ${act.document_number} за период с ${formatDateRu(act.period_start)} по ${formatDateRu(act.period_end)}`
+        : `Акт выполненных работ за период с ${formatDateRu(act.period_start)} по ${formatDateRu(act.period_end)}`,
       charged: Number(act.total_amount),
       paid: 0
     })),
@@ -374,5 +575,6 @@ module.exports = {
   getLedgerRows,
   getLegacyJournalEntry,
   getReconciliationPeriodBounds,
+  getUnsignedPreviousMonthActCandidate,
   getYearlyMonthlyTotals
 };

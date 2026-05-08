@@ -82,7 +82,7 @@ CREATE TABLE IF NOT EXISTS generated_documents (
 
 CREATE TABLE IF NOT EXISTS month_uploaded_documents (
   id BIGSERIAL PRIMARY KEY,
-  doc_kind VARCHAR(20) NOT NULL CHECK (doc_kind IN ('reconciliation')),
+  doc_kind VARCHAR(20) NOT NULL CHECK (doc_kind IN ('act', 'reconciliation')),
   doc_year INTEGER NOT NULL CHECK (doc_year >= 2000),
   doc_month SMALLINT NOT NULL CHECK (doc_month BETWEEN 1 AND 12),
   signed_file_path TEXT NOT NULL,

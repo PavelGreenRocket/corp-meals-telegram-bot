@@ -14,8 +14,15 @@ const {
   listDocuments,
   markDocumentSent
 } = require("../services/documentService");
-const { getBalanceSummary, getLedgerRows, getReconciliationPeriodBounds, getYearlyMonthlyTotals } = require("../services/ledgerService");
+const {
+  getBalanceSummary,
+  getLedgerRows,
+  getReconciliationPeriodBounds,
+  getUnsignedPreviousMonthActCandidate,
+  getYearlyMonthlyTotals
+} = require("../services/ledgerService");
 const { createMealEntry, deleteMealEntry, getEmployeeSpentForDate, getMealEntryById, getMealSummary, listMealEntries, updateMealEntry } = require("../services/mealService");
+const { getMonthUploadedDocument, upsertMonthUploadedDocument } = require("../services/monthDocumentService");
 const { getCustomerDetails, getPerformerDetails, updateCustomerDetails, updatePerformerDetails } = require("../services/settingsService");
 const { getUserById, listUsers, toggleUserActive, updateUserRsSettings, upsertUser, updateUserRole } = require("../services/userService");
 const { backHomeKeyboard, datePresetKeyboard, mainMenu, rolePreviewKeyboard } = require("./ui");
@@ -152,6 +159,11 @@ function getSelectedReportMonthLabel(ctx) {
 
 function getCompactReportMonthLabel(month, year) {
   return `${MONTH_SHORT_LABELS[month - 1]}. ${String(year).slice(-2)}`;
+}
+
+function getShortMonthYearLabel(month, year) {
+  const label = MONTH_SHORT_LABELS[month - 1];
+  return label ? `${label} ${String(year).slice(-2)}` : `${month}.${String(year).slice(-2)}`;
 }
 
 function getActMonthButtonLabel(month, year) {
@@ -458,11 +470,14 @@ function getDocumentMonthPeriod(preset = "current") {
   };
 }
 
-async function getDefaultDocumentFlowData(kind) {
+async function getDefaultDocumentFlowData(kind, options = {}) {
   if (kind === "reconciliation") {
-    const period = await getReconciliationPeriodBounds(todayIso());
+    const includeUnsignedPreviousMonth = Boolean(options.includeUnsignedPreviousMonth);
+    const period = await getReconciliationPeriodBounds(todayIso(), { includeUnsignedPreviousMonth });
     return {
       ...period,
+      includeUnsignedPreviousMonth,
+      pendingUnsignedPreviousMonth: options.pendingUnsignedPreviousMonth || null,
       selectedPreset: "all"
     };
   }
@@ -551,19 +566,71 @@ function buildDocumentPeriodKeyboard(kind, state) {
   ]);
 }
 
+function buildUnsignedPreviousMonthChoiceKeyboard(candidate) {
+  const monthLabel = `${monthNameRu(candidate.month)} ${candidate.year}`;
+  return buildRowsKeyboard([
+    [Markup.button.callback("Включить только подписанные", "doc:reconciliation:unsigned_previous:strict")],
+    [
+      Markup.button.callback(
+        `Включить ${monthLabel}`,
+        "doc:reconciliation:unsigned_previous:include"
+      )
+    ],
+    [Markup.button.callback("🔙", "doc:create_menu")]
+  ]);
+}
+
+async function showReconciliationStartScreen(ctx) {
+  const candidate = await getUnsignedPreviousMonthActCandidate(todayIso());
+  if (!candidate) {
+    await showDocumentPeriodScreen(ctx, "reconciliation");
+    return;
+  }
+
+  setFlow(ctx, "doc:reconciliation:unsigned_previous_month", "choice", {
+    pendingUnsignedPreviousMonth: candidate
+  });
+
+  await renderScreen(
+    ctx,
+    buildHtmlScreen(
+      "Акт сверки",
+      `За ${monthYearLabel(candidate.month, candidate.year)} есть начисления, но подписанный акт вып. работ не загружен`,
+      [
+        lineHtml("Период", `${formatDateRu(candidate.startDate)} - ${formatDateRu(candidate.endDate)}`),
+        lineHtml("Начисления", `${formatAmount(candidate.totalAmount)} руб.`),
+        "",
+        "<u>Как формируем акт сверки?</u>"
+      ]
+    ),
+    buildUnsignedPreviousMonthChoiceKeyboard(candidate)
+  );
+}
+
 async function showDocumentPeriodScreen(ctx, kind, state = null) {
   const flowName = kind === "act" ? "doc:act" : "doc:reconciliation";
   const data = state || await getDefaultDocumentFlowData(kind);
   setFlow(ctx, flowName, "period", data);
+  const lines = [
+    lineHtml("Период", `${formatDateRu(data.startDate)} - ${formatDateRu(data.endDate)}`)
+  ];
+
+  if (kind === "reconciliation" && data.pendingUnsignedPreviousMonth) {
+    const pending = data.pendingUnsignedPreviousMonth;
+    lines.push(lineHtml(
+      "Расчёт",
+      data.includeUnsignedPreviousMonth
+        ? `включён ${monthYearLabel(pending.month, pending.year)} без подписанного акта`
+        : "только подписанные акты"
+    ));
+  }
 
   await renderScreen(
     ctx,
     buildHtmlScreen(
       kind === "act" ? "Сформировать акт выполненных работ" : "Сформировать акт сверки",
-      kind === "act" ? "Выберите месяц" : "Период берётся автоматически по доступной истории",
-      [
-        lineHtml("Период", `${formatDateRu(data.startDate)} - ${formatDateRu(data.endDate)}`)
-      ]
+      kind === "act" ? "Выберите месяц" : "Проверьте период перед формированием",
+      lines
     ),
     buildDocumentPeriodKeyboard(kind, data)
   );
@@ -683,7 +750,39 @@ function buildHtmlScreen(title, subtitle = null, lines = []) {
   return parts.join("\n");
 }
 
-function buildDocumentDownloadName(document, signed = false) {
+function getDocumentDownloadMonthYear(document, override = {}) {
+  if (override.month && override.year) {
+    return { month: Number(override.month), year: Number(override.year) };
+  }
+
+  if (document.act_month && document.act_year) {
+    return { month: Number(document.act_month), year: Number(document.act_year) };
+  }
+
+  const sourceDate = document.doc_type === DOCUMENT_TYPES.RECONCILIATION
+    ? document.period_end || document.document_date
+    : document.period_start || document.document_date;
+  const [year, month] = String(sourceDate || "")
+    .split("-")
+    .slice(0, 2)
+    .map(Number);
+
+  return month && year ? { month, year } : null;
+}
+
+function buildDocumentDownloadName(document, signed = false, options = {}) {
+  if (signed) {
+    const monthYear = getDocumentDownloadMonthYear(document, options);
+    if (monthYear) {
+      const periodLabel = getShortMonthYearLabel(monthYear.month, monthYear.year);
+      const baseName = document.doc_type === DOCUMENT_TYPES.ACT
+        ? `Акт вып. работ ${periodLabel}`
+        : `Акт сверки ${periodLabel}`;
+
+      return `${baseName} (подписанный).docx`;
+    }
+  }
+
   const dateLabel = formatDateShort(document.document_date);
   const baseName = document.doc_type === DOCUMENT_TYPES.ACT
     ? `Акт вып. работ от ${dateLabel}`
@@ -1054,7 +1153,7 @@ async function showJournal(ctx, page = 0) {
     rows.push([
       Markup.button.callback(formatDateRu(item.date_value), callback),
       Markup.button.callback(item.operation_type === "advance" ? "Аванс" : abbreviateFullName(item.employee_name), callback),
-      Markup.button.callback(`${formatAmount(item.amount)} в‚Ѕ`, callback)
+      Markup.button.callback(formatAmount(item.amount), callback)
     ]);
   });
 
@@ -1148,7 +1247,7 @@ async function showClientMonthDetails(ctx, month, year) {
       ),
       Markup.button.callback(
         documents.reconciliation?.signed_file_path ? "✏️ Изменить" : "📤 Загрузить",
-        documents.reconciliation ? `doc:uploadsigned:${documents.reconciliation.id}` : "doc:upload:no_document"
+        `client:doc:uploadmonth:reconciliation:${year}:${month}`
       )
     ]);
     rows.push([
@@ -1158,7 +1257,7 @@ async function showClientMonthDetails(ctx, month, year) {
       ),
       Markup.button.callback(
         documents.act?.signed_file_path ? "✏️ Изменить" : "📤 Загрузить",
-        documents.act ? `doc:uploadsigned:${documents.act.id}` : "doc:upload:no_document"
+        `client:doc:uploadmonth:act:${year}:${month}`
       )
     ]);
   } else {
@@ -1203,7 +1302,7 @@ async function showClientMonthJournal(ctx, month, year, page = 0) {
       rows.push([
         Markup.button.callback(formatDateRu(item.meal_date), `client:meal:view:${item.id}:${year}:${month}:${page}`),
         Markup.button.callback(abbreviateFullName(item.employee_name), `client:meal:view:${item.id}:${year}:${month}:${page}`),
-        Markup.button.callback(`${formatAmount(item.amount)} в‚Ѕ`, `client:meal:view:${item.id}:${year}:${month}:${page}`)
+        Markup.button.callback(formatAmount(item.amount), `client:meal:view:${item.id}:${year}:${month}:${page}`)
       ]);
     });
   }
@@ -1220,7 +1319,7 @@ async function showClientMonthJournal(ctx, month, year, page = 0) {
     rows.push(navRow);
   }
 
-  rows.push([Markup.button.callback(`Итого питание: ${formatAmount(summary.totalAmount)} ₽`, "noop")]);
+  rows.push([Markup.button.callback(`Итого питание: ${formatAmount(summary.totalAmount)}`, "noop")]);
   rows.push(buildClientJournalFooter(month, year));
 
   await renderScreen(
@@ -1552,7 +1651,7 @@ async function showDocumentDetail(ctx, documentId) {
   );
 }
 
-async function sendDocumentFile(ctx, documentId, signed = false) {
+async function sendDocumentFile(ctx, documentId, signed = false, options = {}) {
   const document = await getDocumentById(documentId);
   if (!document) {
     await renderScreen(ctx, buildHtmlScreen("Документ", "Файл не найден"), backHomeKeyboard());
@@ -1565,12 +1664,31 @@ async function sendDocumentFile(ctx, documentId, signed = false) {
     return;
   }
 
-  const fileName = buildDocumentDownloadName(document, signed);
+  const fileName = buildDocumentDownloadName(document, signed, options);
   await ctx.replyWithDocument(Input.fromLocalFile(filePath, fileName));
 
   if (!signed && getDisplayedRole(ctx) === USER_ROLES.OWNER) {
     await markDocumentSent(documentId);
   }
+}
+
+async function sendMonthUploadedDocumentFile(ctx, docKind, year, month) {
+  const document = await getMonthUploadedDocument(docKind, year, month);
+  if (!document?.signed_file_path) {
+    await renderScreen(ctx, buildHtmlScreen("Документ", "Файл пока не загружен"), backHomeKeyboard());
+    return;
+  }
+
+  const fileName = buildDocumentDownloadName(
+    {
+      ...document,
+      doc_type: docKind,
+      period_end: getMonthRange(month, year).endDate
+    },
+    true,
+    { month, year }
+  );
+  await ctx.replyWithDocument(Input.fromLocalFile(document.signed_file_path, fileName));
 }
 
 async function promptSettingsFieldEdit(ctx, entity, fieldKey) {
@@ -1733,7 +1851,7 @@ async function saveMealFromFlow(ctx, flow, amount) {
       flow.data.employeeId,
       [
         "<b>❗ Лимит превышен</b>",
-        "Нельзя добавить питание сверх 300 ₽ в день"
+        `Нельзя добавить питание сверх ${formatAmount(DAILY_LIMIT)} в день`
       ]
     );
     return;
@@ -2156,6 +2274,39 @@ async function handleDocumentUpload(ctx) {
     return;
   }
 
+  if (flow.data.uploadMode === "month") {
+    const year = Number(flow.data.year);
+    const month = Number(flow.data.month);
+    const docKind = flow.data.docKind;
+
+    if (!year || !month || ![DOCUMENT_TYPES.ACT, DOCUMENT_TYPES.RECONCILIATION].includes(docKind)) {
+      clearFlow(ctx);
+      await renderScreen(ctx, buildHtmlScreen("Загрузка документа", "Не удалось определить месяц документа"));
+      return;
+    }
+
+    await ensureDir(config.signedDocumentsDir);
+
+    const fileName = ctx.message.document.file_name || `${docKind}_${year}_${month}.bin`;
+    const extension = path.extname(fileName) || ".bin";
+    const safePath = buildFilePath(config.signedDocumentsDir, `${docKind}_${year}_${String(month).padStart(2, "0")}_${Date.now()}${extension}`);
+    const link = await ctx.telegram.getFileLink(ctx.message.document.file_id);
+
+    await downloadFile(String(link), safePath);
+    await upsertMonthUploadedDocument({
+      docKind,
+      year,
+      month,
+      signedFilePath: safePath,
+      originalFileName: fileName,
+      userId: ctx.state.user.id
+    });
+
+    clearFlow(ctx);
+    await showClientMonthDetails(ctx, month, year);
+    return;
+  }
+
   const doc = await getDocumentById(flow.data.documentId);
   if (!doc) {
     clearFlow(ctx);
@@ -2174,13 +2325,17 @@ async function handleDocumentUpload(ctx) {
   await attachSignedDocument(doc.id, safePath, ctx.state.user.id);
 
   clearFlow(ctx);
-  const [year, month] = String(doc.period_start || doc.document_date || "")
-    .split("-")
-    .slice(0, 2)
-    .map(Number);
+  const returnYear = Number(flow.data.year);
+  const returnMonth = Number(flow.data.month);
 
-  if (year && month) {
-    await showClientMonthDetails(ctx, month, year);
+  if (flow.data.returnTo === "client_month" && returnYear && returnMonth) {
+    await showClientMonthDetails(ctx, returnMonth, returnYear);
+    return;
+  }
+
+  const fallbackMonthYear = getDocumentDownloadMonthYear(doc);
+  if (fallbackMonthYear) {
+    await showClientMonthDetails(ctx, fallbackMonthYear.month, fallbackMonthYear.year);
     return;
   }
 
@@ -2303,7 +2458,7 @@ function registerHandlers(bot) {
     const yearTotals = await getYearlyMonthlyTotals(year);
     const current = yearTotals.months.find((item) => item.month === month);
     const amountLabel = formatClientAmountLabel(current?.advanceTotal || 0, { zeroAsDash: true });
-    await answerCb(ctx, `Авансы за ${getMonthShortButtonLabel(month)}: ${amountLabel === "-" ? amountLabel : `${amountLabel} ₽`}`);
+    await answerCb(ctx, `Авансы за ${getMonthShortButtonLabel(month)}: ${amountLabel}`);
   }));
 
   bot.action(/client:month:open:(\d{4}):(\d{1,2})/, withError(async (ctx) => {
@@ -2399,12 +2554,17 @@ function registerHandlers(bot) {
     const document = type === "act" ? documents.act : documents.reconciliation;
 
     if (!document) {
-      await answerCb(ctx, "документ не сформирован");
+      await answerCb(ctx, "документ не загружен");
       return;
     }
 
     await answerCb(ctx);
-    await sendDocumentFile(ctx, document.id, Boolean(document.signed_file_path));
+    if (document.is_month_upload) {
+      await sendMonthUploadedDocumentFile(ctx, type, year, month);
+      return;
+    }
+
+    await sendDocumentFile(ctx, document.id, Boolean(document.signed_file_path), { month, year });
   }));
 
   bot.action(/nav:(meals|advances|reports|documents|employees|users|settings|role)/, withError(async (ctx) => {
@@ -3328,17 +3488,40 @@ function registerHandlers(bot) {
       await answerCb(ctx, "Недостаточно прав");
       return;
     }
-    await showDocumentPeriodScreen(ctx, "reconciliation");
+    await showReconciliationStartScreen(ctx);
   }));
 
   bot.action("doc:reconciliation:menu", withError(async (ctx) => {
     await answerCb(ctx);
-    await showDocumentPeriodScreen(ctx, "reconciliation");
+    await showReconciliationStartScreen(ctx);
   }));
 
   bot.action("doc:reconciliation:custom", withError(async (ctx) => {
     await answerCb(ctx);
     await showDocumentPeriodScreen(ctx, "reconciliation");
+  }));
+
+  bot.action(/doc:reconciliation:unsigned_previous:(strict|include)/, withError(async (ctx) => {
+    await answerCb(ctx);
+    const includeUnsignedPreviousMonth = ctx.match[1] === "include";
+    const flow = currentFlow(ctx);
+    const pendingUnsignedPreviousMonth = flow?.name === "doc:reconciliation:unsigned_previous_month"
+      ? flow.data.pendingUnsignedPreviousMonth
+      : await getUnsignedPreviousMonthActCandidate(todayIso());
+    const data = await getDefaultDocumentFlowData("reconciliation", {
+      includeUnsignedPreviousMonth,
+      pendingUnsignedPreviousMonth
+    });
+    const document = await generateReconciliationDocument({
+      startDate: data.startDate,
+      endDate: data.endDate,
+      includeUnsignedPreviousMonth,
+      userId: ctx.state.user.id
+    });
+
+    clearFlow(ctx);
+    await sendDocumentFile(ctx, document.id, false);
+    await showDocumentCreateMenu(ctx);
   }));
 
   bot.action("doc:reconciliation:picker", withError(async (ctx) => {
@@ -3371,7 +3554,12 @@ function registerHandlers(bot) {
 
   bot.action(/doc:reconciliation:month:(\d{4}):(\d{1,2})/, withError(async (ctx) => {
     await answerCb(ctx);
-    await showDocumentPeriodScreen(ctx, "reconciliation", getDocumentMonthPeriod("current"));
+    const year = Number(ctx.match[1]);
+    const month = Number(ctx.match[2]);
+    await showDocumentPeriodScreen(ctx, "reconciliation", {
+      ...getMonthRange(month, year),
+      selectedPreset: "custom"
+    });
   }));
 
   bot.action("doc:reconciliation:apply", withError(async (ctx) => {
@@ -3381,6 +3569,7 @@ function registerHandlers(bot) {
     const document = await generateReconciliationDocument({
       startDate: data.startDate,
       endDate: data.endDate,
+      includeUnsignedPreviousMonth: Boolean(data.includeUnsignedPreviousMonth),
       userId: ctx.state.user.id
     });
     clearFlow(ctx);
@@ -3404,7 +3593,43 @@ function registerHandlers(bot) {
   }));
 
   bot.action("doc:upload:no_document", withError(async (ctx) => {
-    await answerCb(ctx, "Сначала сформируйте документ");
+    await answerCb(ctx, "Загрузите документ из экрана месяца");
+  }));
+
+  bot.action(/client:doc:uploadmonth:(act|reconciliation):(\d{4}):(\d{1,2})/, withError(async (ctx) => {
+    await answerCb(ctx);
+    if (!hasDisplayedRole(ctx, USER_ROLES.OWNER)) {
+      await answerCb(ctx, "Недостаточно прав");
+      return;
+    }
+
+    const docKind = ctx.match[1];
+    const year = Number(ctx.match[2]);
+    const month = Number(ctx.match[3]);
+    setFlow(ctx, "doc:upload_signed", "document", {
+      uploadMode: "month",
+      docKind,
+      returnTo: "client_month",
+      year,
+      month
+    });
+    await renderScreen(ctx, buildHtmlScreen("Загрузить подписанный файл", "Отправьте документ в этот чат"));
+  }));
+
+  bot.action(/client:doc:uploadsigned:(\d+):(\d{4}):(\d{1,2})/, withError(async (ctx) => {
+    await answerCb(ctx);
+    if (!hasDisplayedRole(ctx, USER_ROLES.OWNER)) {
+      await answerCb(ctx, "Недостаточно прав");
+      return;
+    }
+
+    setFlow(ctx, "doc:upload_signed", "document", {
+      documentId: Number(ctx.match[1]),
+      returnTo: "client_month",
+      year: Number(ctx.match[2]),
+      month: Number(ctx.match[3])
+    });
+    await renderScreen(ctx, buildHtmlScreen("Загрузить подписанный файл", "Отправьте подписанный документ в этот чат"));
   }));
 
   bot.action(/doc:send:(generated|signed):(\d+)/, withError(async (ctx) => {

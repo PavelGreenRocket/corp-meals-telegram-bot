@@ -22,11 +22,11 @@ function abbreviateFullName(fullName) {
 function formatMealRowButton(entry) {
   return `${formatDateShort(entry.meal_date)} | ${abbreviateFullName(entry.employee_name)} | ${formatAmount(
     entry.amount
-  )} ₽`;
+  )}`;
 }
 
 function formatAdvanceRowButton(entry) {
-  return `${formatDateShort(entry.payment_date)} | Аванс | ${formatAmount(entry.amount)} ₽`;
+  return `${formatDateShort(entry.payment_date)} | Аванс | ${formatAmount(entry.amount)}`;
 }
 
 function formatOperationLine(operation) {
@@ -35,7 +35,7 @@ function formatOperationLine(operation) {
   const date = operation.operation_date || operation.meal_date || operation.payment_date;
   const title = operation.operation_type === "advance" ? "Аванс" : "Питание";
 
-  return `${formatDateRu(date)} | ${title} | ${formatAmount(operation.amount)} ₽${employee}${comment}`;
+  return `${formatDateRu(date)} | ${title} | ${formatAmount(operation.amount)}${employee}${comment}`;
 }
 
 module.exports = {

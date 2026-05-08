@@ -111,9 +111,9 @@ async function showClientCardById(ctx, clientId) {
       `Юр. лицо: ${card.legal_name}`,
       `ИНН: ${card.inn}`,
       `КПП: ${card.kpp || "-"}`,
-      `Всего оплат: ${formatAmount(card.totalPaid)} ₽`,
-      `Всего начислено: ${formatAmount(card.totalCharged)} ₽`,
-      `Остаток: ${formatAmount(card.balance)} ₽`
+      `Всего оплат: ${formatAmount(card.totalPaid)}`,
+      `Всего начислено: ${formatAmount(card.totalCharged)}`,
+      `Остаток: ${formatAmount(card.balance)}`
     ].join("\n")
   );
 }
@@ -129,9 +129,9 @@ async function showClientBalance(ctx, clientId) {
   await ctx.reply(
     [
       `Клиент: ${client.short_name}`,
-      `Всего оплат (advance): ${formatAmount(balanceData.totalPaid)} ₽`,
-      `Всего начислено (meal): ${formatAmount(balanceData.totalCharged)} ₽`,
-      `Текущий остаток аванса: ${formatAmount(balanceData.balance)} ₽`
+      `Всего оплат (advance): ${formatAmount(balanceData.totalPaid)}`,
+      `Всего начислено (meal): ${formatAmount(balanceData.totalCharged)}`,
+      `Текущий остаток аванса: ${formatAmount(balanceData.balance)}`
     ].join("\n")
   );
 }
@@ -295,7 +295,7 @@ async function handleFlowInput(ctx, text) {
       await ctx.reply(
         `Аванс сохранен: ${formatDateRu(operation.operation_date)}, ${formatAmount(
           operation.amount
-        )} ₽`
+        )}`
       );
       await sendMainMenu(ctx);
       return;
@@ -357,7 +357,7 @@ async function handleFlowInput(ctx, text) {
       await ctx.reply(
         `Питание сохранено: ${formatDateRu(operation.operation_date)}, ${formatAmount(
           operation.amount
-        )} ₽`
+        )}`
       );
       await sendMainMenu(ctx);
       return;
@@ -382,7 +382,7 @@ async function handleFlowInput(ctx, text) {
       ctx,
       report.filePath,
       `Акт №${report.actNumber} за ${String(monthYear.month).padStart(2, "0")}.${monthYear.year}\n` +
-        `Сумма: ${formatAmount(report.summary.totalAmount)} ₽, дней: ${report.summary.daysCount}`
+        `Сумма: ${formatAmount(report.summary.totalAmount)}, дней: ${report.summary.daysCount}`
     );
     await sendMainMenu(ctx);
     return;
@@ -406,7 +406,7 @@ async function handleFlowInput(ctx, text) {
       ctx,
       report.filePath,
       `Реестр за ${String(monthYear.month).padStart(2, "0")}.${monthYear.year}\n` +
-        `Сумма: ${formatAmount(report.summary.totalAmount)} ₽, дней: ${report.summary.daysCount}`
+        `Сумма: ${formatAmount(report.summary.totalAmount)}, дней: ${report.summary.daysCount}`
     );
     await sendMainMenu(ctx);
     return;
@@ -433,7 +433,7 @@ async function handleFlowInput(ctx, text) {
       ctx,
       report.filePath,
       `Акт сверки: ${formatDateRu(report.periodStart)} - ${formatDateRu(report.periodEnd)}\n` +
-        `Сальдо на конец: ${formatAmount(report.closingBalance)} ₽`
+        `Сальдо на конец: ${formatAmount(report.closingBalance)}`
     );
     await sendMainMenu(ctx);
     return;

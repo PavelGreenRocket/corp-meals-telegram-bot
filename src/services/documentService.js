@@ -10,6 +10,7 @@ const { createReconciliationDocx } = require("../docs/createReconciliationDocx")
 const { buildReconciliationData, getReconciliationPeriodBounds } = require("./ledgerService");
 const { getLegacyMaxActNumber } = require("./legacySettlementService");
 const { getActSummaryForPeriod, getMonthlyActSummary } = require("./mealService");
+const { getMonthUploadedDocument } = require("./monthDocumentService");
 const {
   getCustomerDetails,
   getDocumentSettings,
@@ -127,30 +128,58 @@ async function getDocumentById(documentId) {
 }
 
 async function getMonthDocuments(month, year) {
-  const { rows } = await pool.query(
-    `
-      SELECT *
-      FROM generated_documents
-      WHERE (doc_type = 'act' AND act_month = $1 AND act_year = $2)
-         OR (
-           doc_type = 'reconciliation'
-           AND EXTRACT(MONTH FROM document_date)::INT = $1
-           AND EXTRACT(YEAR FROM document_date)::INT = $2
-         )
-      ORDER BY document_date DESC, id DESC
-    `,
-    [month, year]
-  );
+  const [actUpload, reconciliationUpload, generated] = await Promise.all([
+    getMonthUploadedDocument(DOCUMENT_TYPES.ACT, year, month),
+    getMonthUploadedDocument(DOCUMENT_TYPES.RECONCILIATION, year, month),
+    pool.query(
+      `
+        SELECT *
+        FROM generated_documents
+        WHERE (doc_type = 'act' AND act_month = $1 AND act_year = $2)
+           OR (
+              doc_type = 'reconciliation'
+              AND EXTRACT(MONTH FROM period_end)::INT = $1
+              AND EXTRACT(YEAR FROM period_end)::INT = $2
+            )
+        ORDER BY document_date DESC, id DESC
+      `,
+      [month, year]
+    )
+  ]);
+  const { rows } = generated;
 
-  let act = null;
-  let reconciliation = null;
+  let act = actUpload ? {
+    ...actUpload,
+    doc_type: DOCUMENT_TYPES.ACT,
+    document_date: `${year}-${String(month).padStart(2, "0")}-01`,
+    period_start: `${year}-${String(month).padStart(2, "0")}-01`,
+    period_end: getMonthRange(month, year).endDate,
+    act_month: month,
+    act_year: year,
+    is_month_upload: true
+  } : null;
+  let reconciliation = reconciliationUpload ? {
+    ...reconciliationUpload,
+    doc_type: DOCUMENT_TYPES.RECONCILIATION,
+    document_date: `${year}-${String(month).padStart(2, "0")}-01`,
+    period_start: `${year}-${String(month).padStart(2, "0")}-01`,
+    period_end: getMonthRange(month, year).endDate,
+    is_month_upload: true
+  } : null;
 
   const signedAct = rows.find((document) =>
     document.doc_type === DOCUMENT_TYPES.ACT && document.signed_file_path
   );
+  const signedReconciliation = rows.find((document) =>
+    document.doc_type === DOCUMENT_TYPES.RECONCILIATION && document.signed_file_path
+  );
 
-  if (signedAct) {
+  if (signedAct && !act) {
     act = signedAct;
+  }
+
+  if (signedReconciliation && !reconciliation) {
+    reconciliation = signedReconciliation;
   }
 
   rows.forEach((document) => {
@@ -407,13 +436,16 @@ async function generateMonthlyAct({
 
 async function generateReconciliationDocument({
   documentDate = todayIso(),
+  startDate = null,
+  endDate = null,
+  includeUnsignedPreviousMonth = false,
   userId = null
 }) {
   await ensureDir(config.documentsDir);
 
-  const defaultPeriod = await getReconciliationPeriodBounds(documentDate);
-  const effectiveStartDate = defaultPeriod.startDate;
-  const effectiveEndDate = defaultPeriod.endDate;
+  const defaultPeriod = await getReconciliationPeriodBounds(documentDate, { includeUnsignedPreviousMonth });
+  const effectiveStartDate = startDate || defaultPeriod.startDate;
+  const effectiveEndDate = endDate || defaultPeriod.endDate;
 
   const [performer, customer] = await Promise.all([
     getPerformerDetails(),
@@ -423,7 +455,8 @@ async function generateReconciliationDocument({
   const reconciliation = await buildReconciliationData({
     startDate: effectiveStartDate,
     endDate: effectiveEndDate,
-    documentDate
+    documentDate,
+    includeUnsignedPreviousMonth
   });
 
   const fileName = sanitizeFileName(`reconciliation_${effectiveStartDate}_${effectiveEndDate}.docx`);

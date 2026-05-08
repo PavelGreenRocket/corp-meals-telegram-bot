@@ -14,7 +14,7 @@ function formatOperationType(type) {
 function formatOperationLine(operation) {
   const persons = operation.persons_count ? `, питающихся: ${operation.persons_count}` : "";
   const comment = operation.comment ? `, комментарий: ${operation.comment}` : "";
-  return `${formatDateRu(operation.operation_date)} | ${formatOperationType(operation.operation_type)} | ${formatAmount(operation.amount)} ₽${persons}${comment}`;
+  return `${formatDateRu(operation.operation_date)} | ${formatOperationType(operation.operation_type)} | ${formatAmount(operation.amount)}${persons}${comment}`;
 }
 
 module.exports = {

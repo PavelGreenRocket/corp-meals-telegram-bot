@@ -8,7 +8,7 @@ async function ensureMonthDocumentsTable() {
       await pool.query(`
         CREATE TABLE IF NOT EXISTS month_uploaded_documents (
           id BIGSERIAL PRIMARY KEY,
-          doc_kind VARCHAR(20) NOT NULL CHECK (doc_kind IN ('reconciliation')),
+          doc_kind VARCHAR(20) NOT NULL CHECK (doc_kind IN ('act', 'reconciliation')),
           doc_year INTEGER NOT NULL CHECK (doc_year >= 2000),
           doc_month SMALLINT NOT NULL CHECK (doc_month BETWEEN 1 AND 12),
           signed_file_path TEXT NOT NULL,
@@ -20,6 +20,10 @@ async function ensureMonthDocumentsTable() {
           UNIQUE (doc_kind, doc_year, doc_month)
         )
       `);
+      await pool.query("ALTER TABLE month_uploaded_documents DROP CONSTRAINT IF EXISTS month_uploaded_documents_doc_kind_check");
+      await pool.query(
+        "ALTER TABLE month_uploaded_documents ADD CONSTRAINT month_uploaded_documents_doc_kind_check CHECK (doc_kind IN ('act', 'reconciliation'))"
+      );
       await pool.query(
         "CREATE INDEX IF NOT EXISTS idx_month_uploaded_documents_period ON month_uploaded_documents(doc_kind, doc_year, doc_month)"
       );
