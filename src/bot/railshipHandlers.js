@@ -23,7 +23,15 @@ const {
 } = require("../services/ledgerService");
 const { createMealEntry, deleteMealEntry, getEmployeeSpentForDate, getMealEntryById, getMealSummary, listMealEntries, updateMealEntry } = require("../services/mealService");
 const { getMonthUploadedDocument, upsertMonthUploadedDocument } = require("../services/monthDocumentService");
-const { getCustomerDetails, getPerformerDetails, updateCustomerDetails, updatePerformerDetails } = require("../services/settingsService");
+const { sendReminderIfNeeded } = require("../services/monthlyDocumentReminderService");
+const {
+  getCustomerDetails,
+  getMonthlyDocumentReminderSettings,
+  getPerformerDetails,
+  updateCustomerDetails,
+  updateMonthlyDocumentReminderSettings,
+  updatePerformerDetails
+} = require("../services/settingsService");
 const { getUserById, listUsers, toggleUserActive, updateUserRsSettings, upsertUser, updateUserRole } = require("../services/userService");
 const { backHomeKeyboard, datePresetKeyboard, mainMenu, rolePreviewKeyboard } = require("./ui");
 const { parseAmount, formatAmount } = require("../utils/money");
@@ -607,6 +615,25 @@ async function showReconciliationStartScreen(ctx) {
   );
 }
 
+async function generateAndSendMonthlyDocumentBundle(ctx, year, month) {
+  const { startDate, endDate } = getMonthRange(month, year);
+  const act = await generateMonthlyAct({
+    month,
+    year,
+    startDate,
+    endDate,
+    actDate: todayIso(),
+    userId: ctx.state.user.id
+  });
+  const reconciliation = await generateReconciliationDocument({
+    includeUnsignedPreviousMonth: true,
+    userId: ctx.state.user.id
+  });
+
+  await sendDocumentFile(ctx, act.id, false, { month, year });
+  await sendDocumentFile(ctx, reconciliation.id, false, { month, year });
+}
+
 async function showDocumentPeriodScreen(ctx, kind, state = null) {
   const flowName = kind === "act" ? "doc:act" : "doc:reconciliation";
   const data = state || await getDefaultDocumentFlowData(kind);
@@ -977,7 +1004,30 @@ async function sendSettingsSection(ctx) {
     buildRowsKeyboard([
       [Markup.button.callback("👤 Пользователи", "nav:users")],
       [Markup.button.callback("📋 Реквизиты сторон", "settings:requisites")],
+      [Markup.button.callback("🗓 Напоминание документов", "settings:monthly_reminder")],
       [Markup.button.callback("🔙", "nav:home")]
+    ])
+  );
+}
+
+async function showMonthlyReminderSettings(ctx) {
+  const settings = await getMonthlyDocumentReminderSettings();
+  const status = settings.day
+    ? `${settings.day} число каждого месяца`
+    : "отключено";
+
+  await renderScreen(
+    ctx,
+    buildHtmlScreen("Напоминание документов", "Ежемесячное предложение сформировать акты", [
+      lineHtml("Статус", status),
+      lineHtml("Получатели", "owner и client"),
+      lineHtml("Действие", "бот предложит сформировать акт выполненных работ и акт сверки")
+    ]),
+    buildRowsKeyboard([
+      [Markup.button.callback("Изменить число", "settings:monthly_reminder:edit")],
+      [Markup.button.callback("Отправить для проверки", "settings:monthly_reminder:test")],
+      [Markup.button.callback("Отключить", "settings:monthly_reminder:disable")],
+      [Markup.button.callback("🔙", "settings:root")]
     ])
   );
 }
@@ -1731,6 +1781,30 @@ async function handleSettingsFieldEdit(ctx, text) {
   await showSettingDetails(ctx, entity, true);
 }
 
+async function handleMonthlyReminderDayEdit(ctx, text) {
+  const value = String(text || "").trim();
+  if (value === "-") {
+    await updateMonthlyDocumentReminderSettings({ day: 0, lastPromptDate: null });
+    clearFlow(ctx);
+    await showMonthlyReminderSettings(ctx);
+    return;
+  }
+
+  const day = Number(value);
+  if (!Number.isInteger(day) || day < 1 || day > 28) {
+    await renderScreen(ctx, buildHtmlScreen("Напоминание документов", "Введите число месяца от 1 до 28 или '-' для отключения"));
+    return;
+  }
+
+  await updateMonthlyDocumentReminderSettings({ day, lastPromptDate: null });
+  clearFlow(ctx);
+  const todayDay = new Date().getDate();
+  if (day === todayDay) {
+    await sendReminderIfNeeded({ telegram: ctx.telegram });
+  }
+  await showMonthlyReminderSettings(ctx);
+}
+
 async function startUserRoleChoice(ctx) {
   setFlow(ctx, "user:add", "telegram_id", {});
   await renderScreen(ctx, buildHtmlScreen("Новый пользователь", "Введите Telegram ID пользователя"));
@@ -2214,6 +2288,11 @@ async function handleTextFlow(ctx, text) {
 
   if (flow.name === "settings:field_edit") {
     await handleSettingsFieldEdit(ctx, text);
+    return;
+  }
+
+  if (flow.name === "settings:monthly_reminder_day") {
+    await handleMonthlyReminderDayEdit(ctx, text);
     return;
   }
 
@@ -2993,6 +3072,48 @@ function registerHandlers(bot) {
     );
   }));
 
+  bot.action("settings:monthly_reminder", withError(async (ctx) => {
+    await answerCb(ctx);
+    clearFlow(ctx);
+    await showMonthlyReminderSettings(ctx);
+  }));
+
+  bot.action("settings:monthly_reminder:edit", withError(async (ctx) => {
+    await answerCb(ctx);
+    if (!hasDisplayedRole(ctx, USER_ROLES.OWNER)) {
+      await answerCb(ctx, "Недостаточно прав");
+      return;
+    }
+
+    setFlow(ctx, "settings:monthly_reminder_day", "text", {});
+    await renderScreen(
+      ctx,
+      buildHtmlScreen("Напоминание документов", "Введите число месяца от 1 до 28 или '-' для отключения")
+    );
+  }));
+
+  bot.action("settings:monthly_reminder:disable", withError(async (ctx) => {
+    await answerCb(ctx);
+    if (!hasDisplayedRole(ctx, USER_ROLES.OWNER)) {
+      await answerCb(ctx, "Недостаточно прав");
+      return;
+    }
+
+    await updateMonthlyDocumentReminderSettings({ day: 0, lastPromptDate: null });
+    await showMonthlyReminderSettings(ctx);
+  }));
+
+  bot.action("settings:monthly_reminder:test", withError(async (ctx) => {
+    await answerCb(ctx);
+    if (!hasDisplayedRole(ctx, USER_ROLES.OWNER)) {
+      await answerCb(ctx, "Недостаточно прав");
+      return;
+    }
+
+    await sendReminderIfNeeded({ telegram: ctx.telegram }, { force: true });
+    await answerCb(ctx, "Отправлено для проверки");
+  }));
+
   bot.action(/settings:view:(performer|customer)/, withError(async (ctx) => {
     await answerCb(ctx);
     clearFlow(ctx);
@@ -3424,6 +3545,22 @@ function registerHandlers(bot) {
       return;
     }
     await showDocumentPeriodScreen(ctx, "act");
+  }));
+
+  bot.action(/monthlydocs:generate:(\d{4}):(\d{1,2})/, withError(async (ctx) => {
+    await answerCb(ctx);
+    if (!hasDisplayedRole(ctx, USER_ROLES.OWNER, USER_ROLES.CLIENT_VIEWER)) {
+      await answerCb(ctx, "Недостаточно прав");
+      return;
+    }
+
+    const year = Number(ctx.match[1]);
+    const month = Number(ctx.match[2]);
+    await generateAndSendMonthlyDocumentBundle(ctx, year, month);
+  }));
+
+  bot.action("monthlydocs:dismiss", withError(async (ctx) => {
+    await answerCb(ctx, "Хорошо, позже");
   }));
 
   bot.action("doc:act:month:custom", withError(async (ctx) => {

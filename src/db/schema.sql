@@ -150,6 +150,13 @@ VALUES
       "vatText": "НДС не облагается.",
       "advanceNote": "Остаток аванса Заказчика подлежит зачету при последующем оказании услуг"
     }$$::jsonb
+  ),
+  (
+    'monthly_document_reminder',
+    $${
+      "day": 0,
+      "lastPromptDate": null
+    }$$::jsonb
   )
 ON CONFLICT (key) DO NOTHING;
 

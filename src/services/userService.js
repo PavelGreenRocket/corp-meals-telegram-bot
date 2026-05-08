@@ -110,6 +110,20 @@ async function listUsers() {
   return rows;
 }
 
+async function listDocumentReminderRecipients() {
+  const { rows } = await pool.query(
+    `
+      SELECT id, telegram_id, full_name, username, role, company, receives_meals, employee_id, is_active, created_at, updated_at
+      FROM app_users
+      WHERE is_active = true
+        AND role IN ($1, $2)
+      ORDER BY role ASC, full_name ASC, telegram_id ASC
+    `,
+    [USER_ROLES.OWNER, USER_ROLES.CLIENT_VIEWER]
+  );
+  return rows;
+}
+
 async function upsertUser({ telegramId, fullName, username = null, role, company = "GR", receivesMeals = false, employeeId = null }) {
   const normalizedRole = normalizeRole(role);
   const { rows } = await pool.query(
@@ -181,6 +195,7 @@ module.exports = {
   ensureBootstrapOwners,
   getUserById,
   getUserByTelegramId,
+  listDocumentReminderRecipients,
   listUsers,
   normalizeRole,
   resolveAccessUser,

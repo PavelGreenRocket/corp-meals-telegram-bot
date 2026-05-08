@@ -34,6 +34,22 @@ async function getDocumentSettings() {
   return getSetting(APP_SETTING_KEYS.DOCUMENT_SETTINGS);
 }
 
+async function getMonthlyDocumentReminderSettings() {
+  const settings = await getSetting(APP_SETTING_KEYS.MONTHLY_DOCUMENT_REMINDER);
+  return {
+    day: Number(settings?.day || 0),
+    lastPromptDate: settings?.lastPromptDate || null
+  };
+}
+
+async function updateMonthlyDocumentReminderSettings(value) {
+  const current = await getMonthlyDocumentReminderSettings();
+  return saveSetting(APP_SETTING_KEYS.MONTHLY_DOCUMENT_REMINDER, {
+    ...current,
+    ...value
+  });
+}
+
 async function updatePerformerDetails(value) {
   return saveSetting(APP_SETTING_KEYS.PERFORMER_DETAILS, value);
 }
@@ -45,9 +61,11 @@ async function updateCustomerDetails(value) {
 module.exports = {
   getCustomerDetails,
   getDocumentSettings,
+  getMonthlyDocumentReminderSettings,
   getPerformerDetails,
   getSetting,
   saveSetting,
   updateCustomerDetails,
+  updateMonthlyDocumentReminderSettings,
   updatePerformerDetails
 };

@@ -2,6 +2,7 @@ const fs = require("fs");
 const config = require("./config");
 const pool = require("./db/pool");
 const createBot = require("./bot");
+const { startMonthlyDocumentReminder } = require("./services/monthlyDocumentReminderService");
 const { ensureBootstrapOwners } = require("./services/userService");
 
 async function start() {
@@ -22,10 +23,12 @@ async function start() {
   const bot = createBot();
 
   await bot.launch();
+  const monthlyDocumentReminder = startMonthlyDocumentReminder(bot);
   console.log("Бот запущен");
 
   const shutdown = async (signal) => {
     console.log(`Получен сигнал ${signal}, завершаем работу...`);
+    clearInterval(monthlyDocumentReminder);
     bot.stop(signal);
     await pool.end();
     process.exit(0);

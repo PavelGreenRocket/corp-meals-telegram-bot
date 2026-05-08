@@ -18,7 +18,8 @@ const DOCUMENT_STATUSES = {
 const APP_SETTING_KEYS = {
   PERFORMER_DETAILS: "performer_details",
   CUSTOMER_DETAILS: "customer_details",
-  DOCUMENT_SETTINGS: "document_settings"
+  DOCUMENT_SETTINGS: "document_settings",
+  MONTHLY_DOCUMENT_REMINDER: "monthly_document_reminder"
 };
 
 const DAILY_LIMIT = 300;
