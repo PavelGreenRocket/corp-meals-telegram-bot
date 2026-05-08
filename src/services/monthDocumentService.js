@@ -88,7 +88,22 @@ async function upsertMonthUploadedDocument({
   return rows[0] || null;
 }
 
+async function deleteMonthUploadedDocument(docKind, year, month) {
+  await ensureMonthDocumentsTable();
+  const { rows } = await pool.query(
+    `
+      DELETE FROM month_uploaded_documents
+      WHERE doc_kind = $1 AND doc_year = $2 AND doc_month = $3
+      RETURNING *
+    `,
+    [docKind, year, month]
+  );
+
+  return rows[0] || null;
+}
+
 module.exports = {
+  deleteMonthUploadedDocument,
   getMonthUploadedDocument,
   upsertMonthUploadedDocument
 };

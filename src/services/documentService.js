@@ -247,6 +247,50 @@ async function attachSignedDocument(documentId, signedFilePath, uploadedByUserId
   return rows[0] || null;
 }
 
+async function clearSignedDocument(documentId) {
+  const { rows } = await pool.query(
+    `
+      UPDATE generated_documents
+      SET signed_file_path = NULL,
+          status = 'generated',
+          uploaded_signed_by_user_id = NULL,
+          uploaded_signed_at = NULL,
+          updated_at = NOW()
+      WHERE id = $1
+      RETURNING *
+    `,
+    [documentId]
+  );
+  return rows[0] || null;
+}
+
+async function clearMonthSignedDocuments(docType, year, month) {
+  const { startDate, endDate } = getMonthRange(month, year);
+  const { rows } = await pool.query(
+    `
+      UPDATE generated_documents
+      SET signed_file_path = NULL,
+          status = 'generated',
+          uploaded_signed_by_user_id = NULL,
+          uploaded_signed_at = NULL,
+          updated_at = NOW()
+      WHERE doc_type = $1
+        AND (
+          (act_year = $2 AND act_month = $3)
+          OR (period_start::DATE = $4::DATE AND period_end::DATE = $5::DATE)
+          OR (
+            doc_type = 'reconciliation'
+            AND EXTRACT(YEAR FROM period_end)::INT = $2
+            AND EXTRACT(MONTH FROM period_end)::INT = $3
+          )
+        )
+      RETURNING *
+    `,
+    [docType, year, month, startDate, endDate]
+  );
+  return rows;
+}
+
 async function findCanonicalActForPeriod(startDate, endDate, db = pool) {
   const legacyMaxActNumber = getLegacyMaxActNumber();
   const { rows } = await db.query(
@@ -492,6 +536,8 @@ async function generateReconciliationDocument({
 
 module.exports = {
   attachSignedDocument,
+  clearMonthSignedDocuments,
+  clearSignedDocument,
   generateMonthlyAct,
   generateReconciliationDocument,
   getDocumentById,

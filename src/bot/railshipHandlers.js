@@ -6,6 +6,8 @@ const { attachAdvanceDocument, createAdvance, deleteAdvance, getAdvanceById, lis
 const { countEmployeeMeals, createEmployee, deleteEmployee, getEmployeeById, listEmployees, listRecentEmployees, toggleEmployeeActive, updateEmployee } = require("../services/employeeService");
 const {
   attachSignedDocument,
+  clearMonthSignedDocuments,
+  clearSignedDocument,
   generateMonthlyAct,
   generateReconciliationDocument,
   getDocumentById,
@@ -22,7 +24,7 @@ const {
   getYearlyMonthlyTotals
 } = require("../services/ledgerService");
 const { createMealEntry, deleteMealEntry, getEmployeeSpentForDate, getMealEntryById, getMealSummary, listMealEntries, updateMealEntry } = require("../services/mealService");
-const { getMonthUploadedDocument, upsertMonthUploadedDocument } = require("../services/monthDocumentService");
+const { deleteMonthUploadedDocument, getMonthUploadedDocument, upsertMonthUploadedDocument } = require("../services/monthDocumentService");
 const { sendReminderIfNeeded } = require("../services/monthlyDocumentReminderService");
 const {
   getCustomerDetails,
@@ -32,7 +34,7 @@ const {
   updateMonthlyDocumentReminderSettings,
   updatePerformerDetails
 } = require("../services/settingsService");
-const { getUserById, listUsers, toggleUserActive, updateUserRsSettings, upsertUser, updateUserRole } = require("../services/userService");
+const { getUserById, listDocumentReminderRecipients, listUsers, toggleUserActive, updateUserRsSettings, upsertUser, updateUserRole } = require("../services/userService");
 const { backHomeKeyboard, datePresetKeyboard, mainMenu, rolePreviewKeyboard } = require("./ui");
 const { parseAmount, formatAmount } = require("../utils/money");
 const {
@@ -251,16 +253,84 @@ function buildSaldoLines(balance, dateLabel, performerDetails, customerDetails) 
   return lines;
 }
 
+function getBalanceSide(balance) {
+  const amount = Number(balance || 0);
+  if (amount > 0) {
+    return "customer";
+  }
+  if (amount < 0) {
+    return "performer";
+  }
+  return "zero";
+}
+
+async function captureBalanceSnapshot() {
+  const [balance, performerDetails, customerDetails] = await Promise.all([
+    getBalanceSummary(),
+    getPerformerDetails(),
+    getCustomerDetails()
+  ]);
+
+  return {
+    balance: balance.balance,
+    customerDetails,
+    performerDetails,
+    side: getBalanceSide(balance.balance)
+  };
+}
+
+async function notifySaldoSideChanged(ctx, beforeSnapshot) {
+  const afterSnapshot = await captureBalanceSnapshot();
+  if (
+    beforeSnapshot.side === "zero" ||
+    afterSnapshot.side === "zero" ||
+    beforeSnapshot.side === afterSnapshot.side
+  ) {
+    return;
+  }
+
+  const party = getSaldoParty(afterSnapshot.balance, afterSnapshot.performerDetails, afterSnapshot.customerDetails);
+  const text = [
+    "Сальдо изменилось в другую пользу.",
+    `Теперь: ${formatAmount(Math.abs(afterSnapshot.balance))} руб. в пользу ${party}.`
+  ].join("\n");
+  const recipients = await listDocumentReminderRecipients();
+
+  for (const recipient of recipients) {
+    try {
+      await ctx.telegram.sendMessage(recipient.telegram_id, text);
+    } catch (error) {
+      console.warn(`Не удалось отправить уведомление о сальдо пользователю ${recipient.telegram_id}: ${error.message}`);
+    }
+  }
+}
+
+async function runWithSaldoNotification(ctx, action) {
+  const beforeSnapshot = await captureBalanceSnapshot();
+  const result = await action();
+  await notifySaldoSideChanged(ctx, beforeSnapshot);
+  return result;
+}
+
 function buildClientDashboardFooter(ctx) {
   const rows = [];
 
   if (getDisplayedRole(ctx) === USER_ROLES.OWNER) {
-    rows.push([Markup.button.callback("📄 Создать документ", "doc:create_menu")]);
-    rows.push([Markup.button.callback("🔙", "nav:home"), Markup.button.callback("🔄 Обновить", "client:home:refresh")]);
+    rows.push([
+      Markup.button.callback("📄 Создать документ", "doc:create_menu"),
+      Markup.button.callback("➕ Добавить питание", "meal:add")
+    ]);
+    rows.push([
+      Markup.button.callback("⚙️ Настройки", "nav:settings"),
+      Markup.button.callback("🔄 Обновить", "client:home:refresh")
+    ]);
     return rows;
   }
 
-  rows.push([Markup.button.callback("🔄 Обновить", "client:home:refresh")]);
+  rows.push([
+    Markup.button.callback("🔄 Обновить", "client:home:refresh"),
+    Markup.button.callback("📄 Создать документ", "doc:create_menu")
+  ]);
   return rows;
 }
 
@@ -848,8 +918,21 @@ async function renderScreen(ctx, html, keyboard = undefined) {
 async function sendMainMenu(ctx, note = null) {
   clearFlow(ctx);
 
-  if (getDisplayedRole(ctx) === USER_ROLES.CLIENT_VIEWER) {
+  if (getDisplayedRole(ctx) === USER_ROLES.CLIENT_VIEWER || getDisplayedRole(ctx) === USER_ROLES.OWNER) {
     await showClientDashboard(ctx, 0);
+    return;
+  }
+
+  if (getDisplayedRole(ctx) === USER_ROLES.BARISTA) {
+    const lines = [];
+    if (note) {
+      lines.push(`<i>${escapeHtml(note)}</i>`);
+    }
+    if (isActualOwner(ctx) && ctx.session.previewRole) {
+      lines.push(`<b>Тестовый просмотр:</b> <code>${escapeHtml(ctx.session.previewRole)}</code>`);
+    }
+
+    await renderScreen(ctx, buildHtmlScreen("Питание Railship", null, lines), mainMenu(getDisplayedRole(ctx)));
     return;
   }
 
@@ -962,15 +1045,21 @@ async function sendDocumentsSection(ctx) {
 }
 
 async function showDocumentCreateMenu(ctx) {
+  const rows = [
+    [Markup.button.callback("Акт выполненных работ", "doc:generate:act")],
+    [Markup.button.callback("Акт сверки", "doc:generate:reconciliation")]
+  ];
+
+  if (getDisplayedRole(ctx) === USER_ROLES.OWNER) {
+    rows.push([Markup.button.callback("Аванс", "doc:advance:add")]);
+  }
+
+  rows.push([Markup.button.callback("🔙", getDisplayedRole(ctx) === USER_ROLES.CLIENT_VIEWER ? "client:home" : "nav:reports")]);
+
   await renderScreen(
     ctx,
     buildHtmlScreen("Создать документ", "Выберите тип документа"),
-    buildRowsKeyboard([
-      [Markup.button.callback("Акт выполненных работ", "doc:generate:act")],
-      [Markup.button.callback("Акт сверки", "doc:generate:reconciliation")],
-      [Markup.button.callback("Аванс", "doc:advance:add")],
-      [Markup.button.callback("🔙", "nav:reports")]
-    ])
+    buildRowsKeyboard(rows)
   );
 }
 
@@ -1237,7 +1326,6 @@ async function showClientDashboard(ctx) {
     getYearlyMonthlyTotals(year)
   ]);
   const lines = buildSaldoLines(balance.balance, formatDateRu(todayIso()), performerDetails, customerDetails);
-  const showEmptyMonths = getDisplayedRole(ctx) === USER_ROLES.OWNER;
   const rows = [
     buildClientYearRow(ctx),
     [
@@ -1249,7 +1337,7 @@ async function showClientDashboard(ctx) {
   const months = yearTotals.months;
   const dashboardItems = [
     ...months
-      .filter((item) => isClientDashboardMonthVisible(item.month, year) && (showEmptyMonths || hasClientDashboardMonthTotals(item)))
+      .filter((item) => isClientDashboardMonthVisible(item.month, year) && hasClientDashboardMonthTotals(item))
       .map((item) => ({
         sortDate: `${year}-${String(item.month).padStart(2, "0")}-01`,
         row: [
@@ -1634,6 +1722,10 @@ function buildSettingsPromptKeyboard(entity) {
   return buildRowsKeyboard([[Markup.button.callback("🔙", `settings:edit:${entity}`)]]);
 }
 
+function getDocumentKindTitle(docKind) {
+  return docKind === DOCUMENT_TYPES.ACT ? "акт выполненных работ" : "акт сверки";
+}
+
 function getUserRoleDisplay(user) {
   if (user.company === "RS") {
     return `RS пользователь${user.receives_meals ? " 🍽" : ""}`;
@@ -1739,6 +1831,24 @@ async function sendMonthUploadedDocumentFile(ctx, docKind, year, month) {
     { month, year }
   );
   await ctx.replyWithDocument(Input.fromLocalFile(document.signed_file_path, fileName));
+}
+
+function buildDeleteMonthDocumentConfirmKeyboard(docKind, year, month) {
+  return buildRowsKeyboard([
+    [Markup.button.callback("Да, удалить", `client:doc:deleteconfirm:${docKind}:${year}:${month}`)],
+    [Markup.button.callback("Отмена", `client:doc:deletecancel:${year}:${month}`)]
+  ]);
+}
+
+async function promptDeleteMonthDocument(ctx, docKind, year, month) {
+  await renderScreen(
+    ctx,
+    buildHtmlScreen(
+      "Удалить акт",
+      `Вы уверены, что хотите удалить ${getDocumentKindTitle(docKind)} за ${monthYearLabel(month, year)}?`
+    ),
+    buildDeleteMonthDocumentConfirmKeyboard(docKind, year, month)
+  );
 }
 
 async function promptSettingsFieldEdit(ctx, entity, fieldKey) {
@@ -1931,13 +2041,13 @@ async function saveMealFromFlow(ctx, flow, amount) {
     return;
   }
 
-  await createMealEntry({
+  await runWithSaldoNotification(ctx, () => createMealEntry({
     mealDate: flow.data.mealDate,
     employeeId: flow.data.employeeId,
     amount,
     comment: null,
     createdByUserId: ctx.state.user.id
-  });
+  }));
 
   clearFlow(ctx);
   await sendMainMenu(ctx, "Питание добавлено.");
@@ -2133,13 +2243,13 @@ async function handleTextFlow(ctx, text) {
       await renderScreen(ctx, buildHtmlScreen("Изменить сумму", "Введите положительную сумму"));
       return;
     }
-    const updated = await updateMealEntry(flow.data.mealId || flow.data.id, {
+    const updated = await runWithSaldoNotification(ctx, () => updateMealEntry(flow.data.mealId || flow.data.id, {
       mealDate: flow.data.mealDate || flow.data.meal_date,
       employeeId: flow.data.employeeId || flow.data.employee_id,
       amount,
       comment: flow.data.comment,
       updatedByUserId: ctx.state.user.id
-    });
+    }));
     clearFlow(ctx);
     await showMealDetail(ctx, updated.id);
     return;
@@ -2164,13 +2274,13 @@ async function handleTextFlow(ctx, text) {
       await renderScreen(ctx, buildHtmlScreen("Изменить дату", "Введите дату в формате ДД.ММ.ГГГГ или YYYY-MM-DD"));
       return;
     }
-    const updated = await updateMealEntry(flow.data.mealId || flow.data.id, {
+    const updated = await runWithSaldoNotification(ctx, () => updateMealEntry(flow.data.mealId || flow.data.id, {
       mealDate,
       employeeId: flow.data.employeeId || flow.data.employee_id,
       amount: flow.data.amount,
       comment: flow.data.comment,
       updatedByUserId: ctx.state.user.id
-    });
+    }));
     clearFlow(ctx);
     await showMealDetail(ctx, updated.id);
     return;
@@ -2212,12 +2322,12 @@ async function handleTextFlow(ctx, text) {
       await renderScreen(ctx, buildHtmlScreen("Изменить аванс", "Введите положительную сумму"));
       return;
     }
-    const updated = await updateAdvance(flow.data.advanceId || flow.data.id, {
+    const updated = await runWithSaldoNotification(ctx, () => updateAdvance(flow.data.advanceId || flow.data.id, {
       paymentDate: flow.data.paymentDate || flow.data.payment_date,
       amount,
       comment: flow.data.comment,
       updatedByUserId: ctx.state.user.id
-    });
+    }));
     clearFlow(ctx);
     await showAdvanceDetail(ctx, updated.id);
     return;
@@ -2241,12 +2351,12 @@ async function handleTextFlow(ctx, text) {
       await renderScreen(ctx, buildHtmlScreen("Изменить дату аванса", "Введите дату в формате ДД.ММ.ГГГГ или YYYY-MM-DD"));
       return;
     }
-    const updated = await updateAdvance(flow.data.advanceId || flow.data.id, {
+    const updated = await runWithSaldoNotification(ctx, () => updateAdvance(flow.data.advanceId || flow.data.id, {
       paymentDate,
       amount: flow.data.amount,
       comment: flow.data.comment,
       updatedByUserId: ctx.state.user.id
-    });
+    }));
     clearFlow(ctx);
     await showAdvanceDetail(ctx, updated.id);
     return;
@@ -2259,6 +2369,38 @@ async function handleTextFlow(ctx, text) {
 
   if (flow.name === "doc:reconciliation") {
     await showDocumentPeriodScreen(ctx, "reconciliation", flow.data || await getDefaultDocumentFlowData("reconciliation"));
+    return;
+  }
+
+  if (flow.name === "doc:upload_signed" && flow.step === "document") {
+    if (text === "-") {
+      if (flow.data.uploadMode === "month") {
+        await promptDeleteMonthDocument(
+          ctx,
+          flow.data.docKind,
+          Number(flow.data.year),
+          Number(flow.data.month)
+        );
+        return;
+      }
+
+      if (flow.data.documentId) {
+        const document = await getDocumentById(flow.data.documentId);
+        const monthYear = document ? getDocumentDownloadMonthYear(document, flow.data) : null;
+        if (document && monthYear) {
+          setFlow(ctx, "doc:upload_signed", "delete_confirm", {
+            ...flow.data,
+            docKind: document.doc_type,
+            year: monthYear.year,
+            month: monthYear.month
+          });
+          await promptDeleteMonthDocument(ctx, document.doc_type, monthYear.year, monthYear.month);
+          return;
+        }
+      }
+    }
+
+    await renderScreen(ctx, buildHtmlScreen("Загрузить подписанный файл", "Отправьте документ в этот чат или '-' для удаления текущего акта"));
     return;
   }
 
@@ -2310,19 +2452,19 @@ async function handleDocumentUpload(ctx) {
 
     await ensureDir(config.signedDocumentsDir);
 
-    const advance = flow.data.advanceId
-      ? await updateAdvance(flow.data.advanceId, {
+    const advance = await runWithSaldoNotification(ctx, () => flow.data.advanceId
+      ? updateAdvance(flow.data.advanceId, {
         paymentDate: flow.data.paymentDate,
         amount: flow.data.amount,
         comment: null,
         updatedByUserId: ctx.state.user.id
       })
-      : await createAdvance({
+      : createAdvance({
         paymentDate: flow.data.paymentDate,
         amount: flow.data.amount,
         comment: null,
         createdByUserId: ctx.state.user.id
-      });
+      }));
 
     const fileName = ctx.message.document.file_name || `advance_${advance.id}.bin`;
     const extension = path.extname(fileName) || ".bin";
@@ -2508,7 +2650,7 @@ function registerHandlers(bot) {
 
   bot.action("doc:create_menu", withError(async (ctx) => {
     await answerCb(ctx);
-    if (!hasDisplayedRole(ctx, USER_ROLES.OWNER)) {
+    if (!hasDisplayedRole(ctx, USER_ROLES.OWNER, USER_ROLES.CLIENT_VIEWER)) {
       await answerCb(ctx, "Недостаточно прав");
       return;
     }
@@ -3332,7 +3474,7 @@ function registerHandlers(bot) {
       await answerCb(ctx, "Недостаточно прав");
       return;
     }
-    await deleteMealEntry(meal.id);
+    await runWithSaldoNotification(ctx, () => deleteMealEntry(meal.id));
     await sendMainMenu(ctx, "Запись питания удалена.");
   }));
 
@@ -3427,7 +3569,7 @@ function registerHandlers(bot) {
       await answerCb(ctx, "Недостаточно прав");
       return;
     }
-    await deleteAdvance(Number(ctx.match[1]));
+    await runWithSaldoNotification(ctx, () => deleteAdvance(Number(ctx.match[1])));
     await sendMainMenu(ctx, "Аванс удалён.");
   }));
 
@@ -3540,7 +3682,7 @@ function registerHandlers(bot) {
 
   bot.action("doc:generate:act", withError(async (ctx) => {
     await answerCb(ctx);
-    if (!hasDisplayedRole(ctx, USER_ROLES.OWNER)) {
+    if (!hasDisplayedRole(ctx, USER_ROLES.OWNER, USER_ROLES.CLIENT_VIEWER)) {
       await answerCb(ctx, "Недостаточно прав");
       return;
     }
@@ -3621,7 +3763,7 @@ function registerHandlers(bot) {
 
   bot.action("doc:generate:reconciliation", withError(async (ctx) => {
     await answerCb(ctx);
-    if (!hasDisplayedRole(ctx, USER_ROLES.OWNER)) {
+    if (!hasDisplayedRole(ctx, USER_ROLES.OWNER, USER_ROLES.CLIENT_VIEWER)) {
       await answerCb(ctx, "Недостаточно прав");
       return;
     }
@@ -3750,7 +3892,36 @@ function registerHandlers(bot) {
       year,
       month
     });
-    await renderScreen(ctx, buildHtmlScreen("Загрузить подписанный файл", "Отправьте документ в этот чат"));
+    await renderScreen(ctx, buildHtmlScreen("Загрузить подписанный файл", "Отправьте документ в этот чат или '-' для удаления текущего акта"));
+  }));
+
+  bot.action(/client:doc:deleteconfirm:(act|reconciliation):(\d{4}):(\d{1,2})/, withError(async (ctx) => {
+    await answerCb(ctx);
+    if (!hasDisplayedRole(ctx, USER_ROLES.OWNER)) {
+      await answerCb(ctx, "Недостаточно прав");
+      return;
+    }
+
+    const docKind = ctx.match[1];
+    const year = Number(ctx.match[2]);
+    const month = Number(ctx.match[3]);
+    const flow = currentFlow(ctx);
+
+    await deleteMonthUploadedDocument(docKind, year, month);
+    await clearMonthSignedDocuments(docKind, year, month);
+    if (flow?.name === "doc:upload_signed" && flow.data.documentId) {
+      await clearSignedDocument(Number(flow.data.documentId));
+    }
+
+    clearFlow(ctx);
+    await answerCb(ctx, "Акт удалён");
+    await showClientMonthDetails(ctx, month, year);
+  }));
+
+  bot.action(/client:doc:deletecancel:(\d{4}):(\d{1,2})/, withError(async (ctx) => {
+    await answerCb(ctx);
+    clearFlow(ctx);
+    await showClientMonthDetails(ctx, Number(ctx.match[2]), Number(ctx.match[1]));
   }));
 
   bot.action(/client:doc:uploadsigned:(\d+):(\d{4}):(\d{1,2})/, withError(async (ctx) => {
@@ -3766,7 +3937,7 @@ function registerHandlers(bot) {
       year: Number(ctx.match[2]),
       month: Number(ctx.match[3])
     });
-    await renderScreen(ctx, buildHtmlScreen("Загрузить подписанный файл", "Отправьте подписанный документ в этот чат"));
+    await renderScreen(ctx, buildHtmlScreen("Загрузить подписанный файл", "Отправьте подписанный документ в этот чат или '-' для удаления текущего акта"));
   }));
 
   bot.action(/doc:send:(generated|signed):(\d+)/, withError(async (ctx) => {
@@ -3792,7 +3963,7 @@ function registerHandlers(bot) {
       return;
     }
     setFlow(ctx, "doc:upload_signed", "document", { documentId: Number(ctx.match[1]) });
-    await renderScreen(ctx, buildHtmlScreen("Загрузить подписанный файл", "Отправьте подписанный документ в этот чат"));
+    await renderScreen(ctx, buildHtmlScreen("Загрузить подписанный файл", "Отправьте подписанный документ в этот чат или '-' для удаления текущего акта"));
   }));
 
   bot.action(/flow:date:(today|yesterday|custom)/, withError(async (ctx) => {
@@ -3828,13 +3999,13 @@ function registerHandlers(bot) {
         await renderScreen(ctx, buildHtmlScreen("Изменить дату", "Введите новую дату в формате ДД.ММ.ГГГГ или YYYY-MM-DD"));
         return;
       }
-      const updated = await updateMealEntry(flow.data.mealId || flow.data.id, {
+      const updated = await runWithSaldoNotification(ctx, () => updateMealEntry(flow.data.mealId || flow.data.id, {
         mealDate: isoDate,
         employeeId: flow.data.employeeId || flow.data.employee_id,
         amount: flow.data.amount,
         comment: flow.data.comment,
         updatedByUserId: ctx.state.user.id
-      });
+      }));
       clearFlow(ctx);
       await answerCb(ctx, "Дата обновлена");
       await showMealDetail(ctx, updated.id);
@@ -3859,12 +4030,12 @@ function registerHandlers(bot) {
         await renderScreen(ctx, buildHtmlScreen("Изменить дату аванса", "Введите новую дату"));
         return;
       }
-      const updated = await updateAdvance(flow.data.advanceId || flow.data.id, {
+      const updated = await runWithSaldoNotification(ctx, () => updateAdvance(flow.data.advanceId || flow.data.id, {
         paymentDate: isoDate,
         amount: flow.data.amount,
         comment: flow.data.comment,
         updatedByUserId: ctx.state.user.id
-      });
+      }));
       clearFlow(ctx);
       await answerCb(ctx, "Дата обновлена");
       await showAdvanceDetail(ctx, updated.id);
