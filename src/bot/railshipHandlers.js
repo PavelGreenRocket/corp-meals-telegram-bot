@@ -334,6 +334,15 @@ function buildClientDashboardFooter(ctx) {
   return rows;
 }
 
+async function requireOwnerOrClientCommand(ctx) {
+  if (hasDisplayedRole(ctx, USER_ROLES.OWNER, USER_ROLES.CLIENT_VIEWER)) {
+    return true;
+  }
+
+  await renderScreen(ctx, buildHtmlScreen("Команда недоступна", "Недостаточно прав"));
+  return false;
+}
+
 function buildClientMonthFooter(month, year) {
   return [
     Markup.button.callback("🔙", "client:home"),
@@ -2613,6 +2622,45 @@ function registerHandlers(bot) {
     "role",
     withError(async (ctx) => {
       await sendRoleScreen(ctx);
+    })
+  );
+
+  bot.command(
+    "meal_journal",
+    withError(async (ctx) => {
+      if (!await requireOwnerOrClientCommand(ctx)) {
+        return;
+      }
+
+      const { month, year } = getCurrentMonthYear();
+      setSelectedReportMonth(ctx, month, year);
+      await showClientMonthJournal(ctx, month, year, 0);
+    })
+  );
+
+  bot.command(
+    "month_docs",
+    withError(async (ctx) => {
+      if (!await requireOwnerOrClientCommand(ctx)) {
+        return;
+      }
+
+      const { month, year } = getCurrentMonthYear();
+      setSelectedReportMonth(ctx, month, year);
+      await showClientMonthDetails(ctx, month, year);
+    })
+  );
+
+  bot.command(
+    "main_report",
+    withError(async (ctx) => {
+      if (!await requireOwnerOrClientCommand(ctx)) {
+        return;
+      }
+
+      const { month, year } = getCurrentMonthYear();
+      setSelectedReportMonth(ctx, month, year);
+      await showClientDashboard(ctx);
     })
   );
 
