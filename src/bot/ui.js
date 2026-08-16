@@ -12,11 +12,9 @@ function mainMenu(role) {
   }
 
   if (role === USER_ROLES.BARISTA) {
-    const rows = [
-      [Markup.button.callback("➕ Добавить питание", "meal:add")],
-      [Markup.button.callback("Режим бариста", "barista:mode")]
-    ];
-    return Markup.inlineKeyboard(rows);
+    return Markup.inlineKeyboard([
+      [Markup.button.callback("➕ Добавить питание", "meal:add")]
+    ]);
   }
 
   const rows = [
