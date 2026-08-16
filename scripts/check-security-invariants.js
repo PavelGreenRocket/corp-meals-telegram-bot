@@ -16,8 +16,8 @@ const botIndex = read("src/bot/index.js");
 
 assertIncludes(
   userService,
-  "AND NOT (company = 'RS' AND receives_meals = true)",
-  "Railship self-service users must be excluded from financial reminders"
+  "AND NOT (company = 'RS' AND receives_meals = true AND role = $2)",
+  "Railship self-service client users must be excluded from financial reminders"
 );
 
 assertIncludes(
