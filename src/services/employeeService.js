@@ -57,13 +57,50 @@ async function getEmployeeById(employeeId) {
 }
 
 async function createEmployee({ fullName, note = null }) {
+  const normalizedFullName = String(fullName || "").trim();
+  const normalizedNote = note ? String(note).trim() : null;
+
+  const existingResult = await pool.query(
+    `
+      SELECT id, full_name, note, is_active, created_at, updated_at
+      FROM employees
+      WHERE LOWER(BTRIM(full_name)) = LOWER(BTRIM($1))
+      ORDER BY is_active DESC, id ASC
+      LIMIT 1
+    `,
+    [normalizedFullName]
+  );
+
+  const existing = existingResult.rows[0];
+  if (existing) {
+    if (existing.is_active) {
+      return existing;
+    }
+
+    const { rows } = await pool.query(
+      `
+        UPDATE employees
+        SET is_active = true,
+            updated_at = NOW()
+        WHERE id = $1
+        RETURNING id, full_name, note, is_active, created_at, updated_at
+      `,
+      [existing.id]
+    );
+    return rows[0];
+  }
+
   const { rows } = await pool.query(
     `
       INSERT INTO employees (full_name, note, is_active, created_at, updated_at)
       VALUES ($1, $2, true, NOW(), NOW())
+      ON CONFLICT (full_name)
+      DO UPDATE SET
+        is_active = true,
+        updated_at = NOW()
       RETURNING id, full_name, note, is_active, created_at, updated_at
     `,
-    [String(fullName || "").trim(), note ? String(note).trim() : null]
+    [normalizedFullName, normalizedNote]
   );
   return rows[0];
 }

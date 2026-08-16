@@ -11,6 +11,22 @@ function buildTelegramFullName(profile) {
   return [profile.first_name, profile.last_name].filter(Boolean).join(" ").trim() || String(profile.id);
 }
 
+function applyRuntimeAccessRole(user) {
+  if (!user) {
+    return user;
+  }
+
+  if (
+    user.company === "RS" &&
+    user.receives_meals &&
+    user.role === USER_ROLES.CLIENT_VIEWER
+  ) {
+    return { ...user, role: USER_ROLES.BARISTA };
+  }
+
+  return user;
+}
+
 async function ensureBootstrapOwners(adminIds = []) {
   for (const telegramId of adminIds) {
     await pool.query(
@@ -85,10 +101,10 @@ async function resolveAccessUser(profile, adminIds = []) {
       `,
       [profile.id, fullName, username]
     );
-    return rows[0];
+    return applyRuntimeAccessRole(rows[0]);
   }
 
-  return user;
+  return applyRuntimeAccessRole(user);
 }
 
 async function listUsers() {
@@ -135,9 +151,13 @@ async function upsertUser({ telegramId, fullName, username = null, role, company
         full_name = EXCLUDED.full_name,
         username = EXCLUDED.username,
         role = EXCLUDED.role,
-        company = EXCLUDED.company,
-        receives_meals = EXCLUDED.receives_meals,
-        employee_id = EXCLUDED.employee_id,
+        company = CASE
+          WHEN app_users.company = 'RS' AND (app_users.receives_meals OR app_users.employee_id IS NOT NULL)
+            THEN app_users.company
+          ELSE EXCLUDED.company
+        END,
+        receives_meals = app_users.receives_meals OR EXCLUDED.receives_meals,
+        employee_id = COALESCE(EXCLUDED.employee_id, app_users.employee_id),
         is_active = true,
         updated_at = NOW()
       RETURNING id, telegram_id, full_name, username, role, company, receives_meals, employee_id, is_active, created_at, updated_at
