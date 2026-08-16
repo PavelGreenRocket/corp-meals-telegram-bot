@@ -4,6 +4,7 @@ const pool = require("./db/pool");
 const createBot = require("./bot");
 const { startMonthlyDocumentReminder } = require("./services/monthlyDocumentReminderService");
 const { ensureBootstrapOwners } = require("./services/userService");
+const { startHealthServer, closeHealthServer } = require("./healthServer");
 
 async function start() {
   if (!config.botToken) {
@@ -24,12 +25,14 @@ async function start() {
 
   await bot.launch();
   const monthlyDocumentReminder = startMonthlyDocumentReminder(bot);
+  const healthServer = startHealthServer({ port: config.healthPort, pool });
   console.log("Бот запущен");
 
   const shutdown = async (signal) => {
     console.log(`Получен сигнал ${signal}, завершаем работу...`);
     clearInterval(monthlyDocumentReminder);
     bot.stop(signal);
+    await closeHealthServer(healthServer);
     await pool.end();
     process.exit(0);
   };
