@@ -27,6 +27,7 @@ const config = {
   dbName: process.env.DB_NAME || "corp_settlements_bot",
   dbUser: process.env.DB_USER || "postgres",
   dbPassword: process.env.DB_PASSWORD || "postgres",
+  healthPort: Number(process.env.HEALTH_PORT || 3000),
   generatedDir,
   documentsDir: path.join(generatedDir, "documents"),
   signedDocumentsDir: path.join(generatedDir, "signed"),
