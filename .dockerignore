@@ -1,0 +1,10 @@
+.git
+node_modules
+npm-debug.log
+.env
+.env.*
+!.env.example
+generated
+Dockerfile
+docker-compose*.yml
+src.zip

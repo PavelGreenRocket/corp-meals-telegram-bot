@@ -4,6 +4,7 @@ const pool = require("./db/pool");
 const createBot = require("./bot");
 const { startMonthlyDocumentReminder } = require("./services/monthlyDocumentReminderService");
 const { ensureBootstrapOwners } = require("./services/userService");
+const { startHealthServer, closeHealthServer } = require("./healthServer");
 
 async function start() {
   if (!config.botToken) {
@@ -21,15 +22,44 @@ async function start() {
   await ensureBootstrapOwners(config.adminIds);
 
   const bot = createBot();
+  let monthlyDocumentReminder = null;
+  let healthServer = null;
+  let shuttingDown = false;
 
-  await bot.launch();
-  const monthlyDocumentReminder = startMonthlyDocumentReminder(bot);
-  console.log("Бот запущен");
+  const launchPromise = bot.launch(() => {
+    monthlyDocumentReminder = startMonthlyDocumentReminder(bot);
+    healthServer = startHealthServer({ port: config.healthPort, pool });
+    console.log("Бот запущен");
+  });
+
+  launchPromise.catch((error) => {
+    if (shuttingDown) {
+      return;
+    }
+
+    console.error("Ошибка Telegram polling:", error.message);
+    process.exit(1);
+  });
 
   const shutdown = async (signal) => {
+    if (shuttingDown) {
+      return;
+    }
+
+    shuttingDown = true;
     console.log(`Получен сигнал ${signal}, завершаем работу...`);
-    clearInterval(monthlyDocumentReminder);
-    bot.stop(signal);
+
+    if (monthlyDocumentReminder) {
+      clearInterval(monthlyDocumentReminder);
+    }
+
+    try {
+      bot.stop(signal);
+    } catch (error) {
+      console.warn("Telegram bot ещё не был полностью запущен:", error.message);
+    }
+
+    await closeHealthServer(healthServer);
     await pool.end();
     process.exit(0);
   };

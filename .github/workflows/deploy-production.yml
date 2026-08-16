@@ -1,0 +1,148 @@
+name: Deploy Corp Meals Production
+
+run-name: "Deploy Corp Meals Production — ${{ github.sha }}"
+
+on:
+  push:
+    branches:
+      - production
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: main-autodeploy-${{ github.repository }}-production
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  BOT_IMAGE: ghcr.io/pavelgreenrocket/corp-meals-telegram-bot
+
+jobs:
+  deploy:
+    name: Build image and deploy production
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: production
+
+    steps:
+      - name: Checkout exact commit
+        uses: actions/checkout@v6
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build and push Corp Meals image
+        uses: docker/build-push-action@v7.2.0
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          pull: true
+          push: true
+          tags: ${{ env.BOT_IMAGE }}:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=corp-meals-production
+          cache-to: type=gha,mode=max,scope=corp-meals-production
+
+      - name: Configure restricted SSH access
+        shell: bash
+        env:
+          DEPLOY_PRIVATE_KEY_B64: ${{ secrets.MAIN_DEPLOY_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.MAIN_DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -Eeuo pipefail
+          umask 077
+
+          [ -n "${DEPLOY_PRIVATE_KEY_B64:-}" ] || {
+            echo "Secret MAIN_DEPLOY_KEY is unavailable." >&2
+            exit 1
+          }
+
+          [ -n "${DEPLOY_KNOWN_HOSTS:-}" ] || {
+            echo "Secret MAIN_DEPLOY_KNOWN_HOSTS is unavailable." >&2
+            exit 1
+          }
+
+          install -d -m 700 "$HOME/.ssh"
+
+          printf '%s' "$DEPLOY_PRIVATE_KEY_B64" \
+            | base64 --decode \
+            > "$HOME/.ssh/id_ed25519"
+
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" \
+            > "$HOME/.ssh/known_hosts"
+
+          chmod 600 \
+            "$HOME/.ssh/id_ed25519" \
+            "$HOME/.ssh/known_hosts"
+
+          grep -qx \
+            -- '-----BEGIN OPENSSH PRIVATE KEY-----' \
+            <(head -n 1 "$HOME/.ssh/id_ed25519") || {
+              echo "Decoded secret is not an OpenSSH private key." >&2
+              exit 1
+            }
+
+          ssh-keygen -y \
+            -f "$HOME/.ssh/id_ed25519" \
+            >/dev/null
+
+      - name: Deploy exact image to MAIN
+        shell: bash
+        env:
+          DEPLOY_REPOSITORY: ${{ github.repository }}
+          DEPLOY_BRANCH: ${{ github.ref_name }}
+          DEPLOY_SHA: ${{ github.sha }}
+        run: |
+          set -Eeuo pipefail
+
+          [ "$DEPLOY_BRANCH" = "production" ] || {
+            echo "Unexpected branch: $DEPLOY_BRANCH" >&2
+            exit 1
+          }
+
+          [[ "$DEPLOY_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || {
+            echo "Invalid repository: $DEPLOY_REPOSITORY" >&2
+            exit 1
+          }
+
+          [[ "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "Invalid commit SHA: $DEPLOY_SHA" >&2
+            exit 1
+          }
+
+          ssh \
+            -T \
+            -i "$HOME/.ssh/id_ed25519" \
+            -p 22 \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o PasswordAuthentication=no \
+            -o KbdInteractiveAuthentication=no \
+            -o PreferredAuthentications=publickey \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+            -o GlobalKnownHostsFile=/dev/null \
+            -o ConnectTimeout=20 \
+            -o ServerAliveInterval=30 \
+            -o ServerAliveCountMax=10 \
+            -o LogLevel=ERROR \
+            ghdeploy@38.180.100.46 \
+            "deploy $DEPLOY_REPOSITORY $DEPLOY_BRANCH $DEPLOY_SHA"
+
+      - name: Remove temporary SSH key
+        if: always()
+        shell: bash
+        run: rm -f "$HOME/.ssh/id_ed25519"

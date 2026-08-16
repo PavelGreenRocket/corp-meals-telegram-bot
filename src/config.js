@@ -31,6 +31,7 @@ const config = {
   dbUser: process.env.DB_USER || "postgres",
   dbPassword: process.env.DB_PASSWORD || "postgres",
   appTimeZone,
+  healthPort: Number(process.env.HEALTH_PORT || 3000),
   generatedDir,
   documentsDir: path.join(generatedDir, "documents"),
   signedDocumentsDir: path.join(generatedDir, "signed"),

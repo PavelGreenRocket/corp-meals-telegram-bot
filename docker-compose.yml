@@ -1,0 +1,54 @@
+name: meal-accounting-bot
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: mealbot-postgres
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - mealbot_postgres_data:/var/lib/postgresql/data
+    expose:
+      - "5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: meal-accounting-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      HEALTH_PORT: "3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - generated_data:/app/generated
+    ports:
+      - "127.0.0.1:43001:3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+volumes:
+  mealbot_postgres_data:
+    external: true
+    name: meal-accounting-bot_mealbot_postgres_data
+  generated_data:
+    external: true
+    name: corp_meals_generated_data
