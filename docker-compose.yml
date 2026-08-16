@@ -47,6 +47,8 @@ services:
 
 volumes:
   mealbot_postgres_data:
+    external: true
     name: meal-accounting-bot_mealbot_postgres_data
   generated_data:
+    external: true
     name: corp_meals_generated_data
