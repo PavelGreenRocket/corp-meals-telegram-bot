@@ -175,7 +175,7 @@ async function listDocumentReminderRecipients() {
       FROM app_users
       WHERE is_active = true
         AND role IN ($1, $2)
-        AND NOT (company = 'RS' AND receives_meals = true)
+        AND NOT (company = 'RS' AND receives_meals = true AND role = $2)
       ORDER BY role ASC, full_name ASC, telegram_id ASC
     `,
     [USER_ROLES.OWNER, USER_ROLES.CLIENT_VIEWER]
