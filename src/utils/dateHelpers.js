@@ -1,7 +1,12 @@
-﻿const dayjs = require("dayjs");
+const dayjs = require("dayjs");
 const customParseFormat = require("dayjs/plugin/customParseFormat");
+const utc = require("dayjs/plugin/utc");
+const timezone = require("dayjs/plugin/timezone");
+const config = require("../config");
 
 dayjs.extend(customParseFormat);
+dayjs.extend(utc);
+dayjs.extend(timezone);
 
 const MONTH_NAMES = [
   "январь",
@@ -128,26 +133,46 @@ function monthYearLabel(month, year) {
 }
 
 function todayIso() {
-  return dayjs().format("YYYY-MM-DD");
+  return dayjs().tz(config.appTimeZone).format("YYYY-MM-DD");
 }
 
 function yesterdayIso() {
-  return dayjs().subtract(1, "day").format("YYYY-MM-DD");
+  return dayjs().tz(config.appTimeZone).subtract(1, "day").format("YYYY-MM-DD");
 }
 
 function startOfCurrentMonth() {
-  return dayjs().startOf("month").format("YYYY-MM-DD");
+  return dayjs().tz(config.appTimeZone).startOf("month").format("YYYY-MM-DD");
 }
 
 function endOfCurrentMonth() {
-  return dayjs().endOf("month").format("YYYY-MM-DD");
+  return dayjs().tz(config.appTimeZone).endOf("month").format("YYYY-MM-DD");
+}
+
+function getCurrentDateParts() {
+  const current = dayjs().tz(config.appTimeZone);
+  return {
+    day: current.date(),
+    isoDate: current.format("YYYY-MM-DD"),
+    month: current.month() + 1,
+    year: current.year()
+  };
+}
+
+function getPreviousMonthParts() {
+  const previous = dayjs().tz(config.appTimeZone).subtract(1, "month");
+  return {
+    month: previous.month() + 1,
+    year: previous.year()
+  };
 }
 
 module.exports = {
   endOfCurrentMonth,
   formatDateRu,
   formatDateShort,
+  getCurrentDateParts,
   getMonthRange,
+  getPreviousMonthParts,
   isFullMonthPeriod,
   monthNameRu,
   monthYearLabel,

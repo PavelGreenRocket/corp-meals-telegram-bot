@@ -1,4 +1,4 @@
-﻿const path = require("path");
+const path = require("path");
 const { Input, Markup } = require("telegraf");
 const config = require("../config");
 const { DAILY_LIMIT, DOCUMENT_TYPES, USER_ROLES } = require("../constants");
@@ -14,7 +14,8 @@ const {
   getMonthDocuments,
   hasDocumentsInYear,
   listDocuments,
-  markDocumentSent
+  markDocumentSent,
+  saveMonthSignedDocument
 } = require("../services/documentService");
 const {
   getBalanceSummary,
@@ -24,7 +25,7 @@ const {
   getYearlyMonthlyTotals
 } = require("../services/ledgerService");
 const { createMealEntry, deleteMealEntry, getEmployeeSpentForDate, getMealEntryById, getMealSummary, listMealEntries, updateMealEntry } = require("../services/mealService");
-const { deleteMonthUploadedDocument, getMonthUploadedDocument, upsertMonthUploadedDocument } = require("../services/monthDocumentService");
+const { deleteMonthUploadedDocument, getMonthUploadedDocument } = require("../services/monthDocumentService");
 const { sendReminderIfNeeded } = require("../services/monthlyDocumentReminderService");
 const {
   getCustomerDetails,
@@ -41,6 +42,7 @@ const {
   endOfCurrentMonth,
   formatDateRu,
   formatDateShort,
+  getCurrentDateParts,
   getMonthRange,
   monthNameRu,
   monthYearLabel,
@@ -52,7 +54,7 @@ const {
   yesterdayIso
 } = require("../utils/dateHelpers");
 const { abbreviateFullName, formatAdvanceRowButton, formatMealRowButton } = require("../utils/display");
-const { buildFilePath, downloadFile, ensureDir } = require("../utils/files");
+const { buildFilePath, downloadFile, ensureDir, unlinkIfExists } = require("../utils/files");
 
 const PAGE_SIZE = 8;
 const QUICK_MEAL_AMOUNTS = [100, 150, 200, 250, 300];
@@ -1979,7 +1981,7 @@ async function handleSettingsFieldEdit(ctx, text) {
 async function handleMonthlyReminderDayEdit(ctx, text) {
   const value = String(text || "").trim();
   if (value === "-") {
-    await updateMonthlyDocumentReminderSettings({ day: 0, lastPromptDate: null });
+    await updateMonthlyDocumentReminderSettings({ day: 0, lastPromptDate: null, lastPromptPeriod: null });
     clearFlow(ctx);
     await showMonthlyReminderSettings(ctx);
     return;
@@ -1991,10 +1993,10 @@ async function handleMonthlyReminderDayEdit(ctx, text) {
     return;
   }
 
-  await updateMonthlyDocumentReminderSettings({ day, lastPromptDate: null });
+  await updateMonthlyDocumentReminderSettings({ day, lastPromptDate: null, lastPromptPeriod: null });
   clearFlow(ctx);
-  const todayDay = new Date().getDate();
-  if (day === todayDay) {
+  const todayDay = getCurrentDateParts().day;
+  if (day <= todayDay) {
     await sendReminderIfNeeded({ telegram: ctx.telegram });
   }
   await showMonthlyReminderSettings(ctx);
@@ -2688,14 +2690,20 @@ async function handleDocumentUpload(ctx) {
     const link = await ctx.telegram.getFileLink(ctx.message.document.file_id);
 
     await downloadFile(String(link), safePath);
-    await upsertMonthUploadedDocument({
-      docKind,
-      year,
-      month,
-      signedFilePath: safePath,
-      originalFileName: fileName,
-      userId: ctx.state.user.id
-    });
+    try {
+      await saveMonthSignedDocument({
+        docType: docKind,
+        year,
+        month,
+        signedFilePath: safePath,
+        originalFileName: fileName,
+        userId: ctx.state.user.id,
+        preferredDocumentId: flow.data.preferredDocumentId || null
+      });
+    } catch (error) {
+      await unlinkIfExists(safePath);
+      throw error;
+    }
 
     clearFlow(ctx);
     await showClientMonthDetails(ctx, month, year);
@@ -3520,7 +3528,7 @@ function registerHandlers(bot) {
       return;
     }
 
-    await updateMonthlyDocumentReminderSettings({ day: 0, lastPromptDate: null });
+    await updateMonthlyDocumentReminderSettings({ day: 0, lastPromptDate: null, lastPromptPeriod: null });
     await showMonthlyReminderSettings(ctx);
   }));
 
@@ -4048,7 +4056,26 @@ function registerHandlers(bot) {
 
   bot.action(/doc:act:month:(\d{4}):(\d{1,2})/, withError(async (ctx) => {
     await answerCb(ctx);
-    await showDocumentPeriodScreen(ctx, "act", getDocumentMonthPeriod("current"));
+    const year = Number(ctx.match[1]);
+    const month = Number(ctx.match[2]);
+    if (month < 1 || month > 12) {
+      await answerCb(ctx, "Некорректный месяц");
+      return;
+    }
+
+    const current = getCurrentMonthYear();
+    const previous = getAdjacentMonth(current.month, current.year, -1);
+    const selectedPreset = year === current.year && month === current.month
+      ? "current"
+      : year === previous.year && month === previous.month
+        ? "previous"
+        : "custom";
+    await showDocumentPeriodScreen(ctx, "act", {
+      ...getMonthRange(month, year),
+      month,
+      year,
+      selectedPreset
+    });
   }));
 
   bot.action("doc:act:apply", withError(async (ctx) => {
@@ -4193,9 +4220,12 @@ function registerHandlers(bot) {
     const docKind = ctx.match[1];
     const year = Number(ctx.match[2]);
     const month = Number(ctx.match[3]);
+    const documents = await getMonthDocuments(month, year);
+    const displayedDocument = docKind === DOCUMENT_TYPES.ACT ? documents.act : documents.reconciliation;
     setFlow(ctx, "doc:upload_signed", "document", {
       uploadMode: "month",
       docKind,
+      preferredDocumentId: displayedDocument && !displayedDocument.is_month_upload ? displayedDocument.id : null,
       returnTo: "client_month",
       year,
       month

@@ -3,6 +3,9 @@ const dotenv = require("dotenv");
 
 dotenv.config({ path: path.resolve(process.cwd(), ".env") });
 
+const appTimeZone = process.env.APP_TIME_ZONE || "Asia/Novosibirsk";
+process.env.TZ = appTimeZone;
+
 function parseAdminIds(raw) {
   if (!raw) {
     return [];
@@ -27,6 +30,7 @@ const config = {
   dbName: process.env.DB_NAME || "corp_settlements_bot",
   dbUser: process.env.DB_USER || "postgres",
   dbPassword: process.env.DB_PASSWORD || "postgres",
+  appTimeZone,
   healthPort: Number(process.env.HEALTH_PORT || 3000),
   generatedDir,
   documentsDir: path.join(generatedDir, "documents"),

@@ -155,7 +155,8 @@ VALUES
     'monthly_document_reminder',
     $${
       "day": 0,
-      "lastPromptDate": null
+      "lastPromptDate": null,
+      "lastPromptPeriod": null
     }$$::jsonb
   )
 ON CONFLICT (key) DO NOTHING;
