@@ -3,7 +3,12 @@ const { DAILY_LIMIT } = require("../constants");
 const { getMonthRange } = require("../utils/dateHelpers");
 const { getLegacyActSummary } = require("./legacySettlementService");
 
-async function getEmployeeSpentForDate(employeeId, mealDate, excludeMealId = null) {
+async function lockEmployeeMealDay(db, employeeId, mealDate) {
+  const lockKey = `meal-limit:${employeeId}:${mealDate}`;
+  await db.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [lockKey]);
+}
+
+async function getEmployeeSpentForDate(employeeId, mealDate, excludeMealId = null, db = pool) {
   const values = [employeeId, mealDate];
   let exclusion = "";
 
@@ -12,7 +17,7 @@ async function getEmployeeSpentForDate(employeeId, mealDate, excludeMealId = nul
     exclusion = `AND id <> $${values.length}`;
   }
 
-  const { rows } = await pool.query(
+  const { rows } = await db.query(
     `
       SELECT COALESCE(SUM(amount), 0) AS total_amount
       FROM meal_entries
@@ -26,8 +31,8 @@ async function getEmployeeSpentForDate(employeeId, mealDate, excludeMealId = nul
   return Number(rows[0]?.total_amount || 0);
 }
 
-async function assertDailyLimit(employeeId, mealDate, amount, excludeMealId = null) {
-  const currentTotal = await getEmployeeSpentForDate(employeeId, mealDate, excludeMealId);
+async function assertDailyLimit(employeeId, mealDate, amount, excludeMealId = null, db = pool) {
+  const currentTotal = await getEmployeeSpentForDate(employeeId, mealDate, excludeMealId, db);
   const nextTotal = Number((currentTotal + Number(amount)).toFixed(2));
 
   if (nextTotal > DAILY_LIMIT) {
@@ -50,20 +55,31 @@ async function createMealEntry({
   comment = null,
   createdByUserId = null
 }) {
-  await assertDailyLimit(employeeId, mealDate, amount);
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await lockEmployeeMealDay(client, employeeId, mealDate);
+    await assertDailyLimit(employeeId, mealDate, amount, null, client);
 
-  const { rows } = await pool.query(
-    `
-      INSERT INTO meal_entries (
-        meal_date, employee_id, amount, comment, created_by_user_id, updated_by_user_id, created_at, updated_at
-      )
-      VALUES ($1, $2, $3, $4, $5, $5, NOW(), NOW())
-      RETURNING *
-    `,
-    [mealDate, employeeId, amount, comment, createdByUserId]
-  );
+    const { rows } = await client.query(
+      `
+        INSERT INTO meal_entries (
+          meal_date, employee_id, amount, comment, created_by_user_id, updated_by_user_id, created_at, updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $5, NOW(), NOW())
+        RETURNING *
+      `,
+      [mealDate, employeeId, amount, comment, createdByUserId]
+    );
 
-  return rows[0];
+    await client.query("COMMIT");
+    return rows[0];
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 async function getMealEntryById(mealId) {
@@ -87,23 +103,35 @@ async function updateMealEntry(
   mealId,
   { mealDate, employeeId, amount, comment = null, updatedByUserId = null }
 ) {
-  await assertDailyLimit(employeeId, mealDate, amount, mealId);
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await lockEmployeeMealDay(client, employeeId, mealDate);
+    await assertDailyLimit(employeeId, mealDate, amount, mealId, client);
 
-  const { rows } = await pool.query(
-    `
-      UPDATE meal_entries
-      SET meal_date = $2,
-          employee_id = $3,
-          amount = $4,
-          comment = $5,
-          updated_by_user_id = $6,
-          updated_at = NOW()
-      WHERE id = $1
-      RETURNING *
-    `,
-    [mealId, mealDate, employeeId, amount, comment, updatedByUserId]
-  );
-  return rows[0] || null;
+    const { rows } = await client.query(
+      `
+        UPDATE meal_entries
+        SET meal_date = $2,
+            employee_id = $3,
+            amount = $4,
+            comment = $5,
+            updated_by_user_id = $6,
+            updated_at = NOW()
+        WHERE id = $1
+        RETURNING *
+      `,
+      [mealId, mealDate, employeeId, amount, comment, updatedByUserId]
+    );
+
+    await client.query("COMMIT");
+    return rows[0] || null;
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 async function deleteMealEntry(mealId) {
