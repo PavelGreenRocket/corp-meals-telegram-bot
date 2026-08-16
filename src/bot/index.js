@@ -37,6 +37,20 @@ function createBot() {
     }
 
     ctx.state.user = accessUser;
+
+    if (accessUser.company === "RS" && accessUser.receives_meals) {
+      ctx.session = ctx.session || {};
+      ctx.session.baristaKind = "railship";
+
+      const callbackData = ctx.callbackQuery?.data;
+      if (callbackData === "barista:mode" || callbackData === "barista:kind:coffee") {
+        await ctx.answerCbQuery("Для сотрудника Railship доступна отметка только своего питания", {
+          show_alert: true
+        });
+        return;
+      }
+    }
+
     return next();
   });
 
