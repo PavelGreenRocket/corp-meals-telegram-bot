@@ -1,0 +1,4 @@
+services:
+  postgres:
+    ports:
+      - "172.17.0.1:55437:5432"
