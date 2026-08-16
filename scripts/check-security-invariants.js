@@ -1,32 +1,45 @@
 const fs = require("fs");
 
-function assertIncludes(filePath, fragment, message) {
-  const content = fs.readFileSync(filePath, "utf8");
+function read(filePath) {
+  return fs.readFileSync(filePath, "utf8");
+}
+
+function assertIncludes(content, fragment, message) {
   if (!content.includes(fragment)) {
-    throw new Error(`${message}: ${filePath}`);
+    throw new Error(message);
   }
 }
 
+const userService = read("src/services/userService.js");
+const mealService = read("src/services/mealService.js");
+const botIndex = read("src/bot/index.js");
+
 assertIncludes(
-  "src/services/userService.js",
+  userService,
   "AND NOT (company = 'RS' AND receives_meals = true)",
   "Railship self-service users must be excluded from financial reminders"
 );
 
 assertIncludes(
-  "src/services/mealService.js",
+  userService,
+  "Этот сотрудник уже привязан к другому пользователю",
+  "One employee must not be linked to multiple active meal users through the service layer"
+);
+
+assertIncludes(
+  mealService,
   "pg_advisory_xact_lock",
   "Daily meal limit must be serialized"
 );
 
 assertIncludes(
-  "src/bot/index.js",
+  botIndex,
   "OWNER_ONLY_CALLBACK_PREFIXES",
   "Administrative stale callbacks must be centrally protected"
 );
 
 assertIncludes(
-  "src/bot/index.js",
+  botIndex,
   "Привязка сотрудника задаётся администратором",
   "Self-service employee selection must stay disabled"
 );
