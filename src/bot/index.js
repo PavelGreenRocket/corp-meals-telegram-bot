@@ -1,6 +1,7 @@
 const https = require("https");
 const { Telegraf, session } = require("telegraf");
 const config = require("../config");
+const { USER_ROLES } = require("../constants");
 const { resolveAccessUser } = require("../services/userService");
 const { registerHandlers } = require("./railshipHandlers");
 
@@ -38,13 +39,14 @@ function createBot() {
 
     ctx.state.user = accessUser;
 
-    if (accessUser.company === "RS" && accessUser.receives_meals) {
+    if (accessUser.role === USER_ROLES.BARISTA) {
       ctx.session = ctx.session || {};
-      ctx.session.baristaKind = "railship";
+      const isRailshipSelfService = accessUser.company === "RS" && accessUser.receives_meals;
+      ctx.session.baristaKind = isRailshipSelfService ? "railship" : "coffee";
 
       const callbackData = ctx.callbackQuery?.data;
-      if (callbackData === "barista:mode" || callbackData === "barista:kind:coffee") {
-        await ctx.answerCbQuery("Для сотрудника Railship доступна отметка только своего питания", {
+      if (callbackData === "barista:mode" || callbackData?.startsWith("barista:kind:")) {
+        await ctx.answerCbQuery("Режим работы назначается автоматически", {
           show_alert: true
         });
         return;
