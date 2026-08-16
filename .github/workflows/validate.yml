@@ -1,0 +1,22 @@
+name: Validate Corp Meals
+
+on:
+  pull_request:
+    branches:
+      - main
+      - production
+
+permissions:
+  contents: read
+
+jobs:
+  syntax:
+    name: Check JavaScript syntax
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Check JavaScript syntax
+        run: npm run check

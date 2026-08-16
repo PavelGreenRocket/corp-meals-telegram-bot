@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node src/app.js",
     "dev": "nodemon src/app.js",
+    "check": "node scripts/check-syntax.js && node scripts/check-security-invariants.js",
     "db:init": "node src/db/initDb.js"
   },
   "keywords": [

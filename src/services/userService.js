@@ -27,13 +27,53 @@ function applyRuntimeAccessRole(user) {
   return user;
 }
 
+async function assertEmployeeLinkAvailable({ employeeId, userId = null, telegramId = null }) {
+  if (!employeeId) {
+    return;
+  }
+
+  const values = [employeeId];
+  const exclusions = [];
+
+  if (userId) {
+    values.push(userId);
+    exclusions.push(`id <> $${values.length}`);
+  }
+
+  if (telegramId) {
+    values.push(telegramId);
+    exclusions.push(`telegram_id <> $${values.length}`);
+  }
+
+  const exclusionSql = exclusions.length ? `AND ${exclusions.join(" AND ")}` : "";
+  const { rows } = await pool.query(
+    `
+      SELECT id, telegram_id, full_name
+      FROM app_users
+      WHERE receives_meals = true
+        AND employee_id = $1
+        ${exclusionSql}
+      LIMIT 1
+    `,
+    values
+  );
+
+  if (rows[0]) {
+    throw new Error("Этот сотрудник уже привязан к другому пользователю");
+  }
+}
+
 async function ensureBootstrapOwners(adminIds = []) {
   for (const telegramId of adminIds) {
     await pool.query(
       `
         INSERT INTO app_users (telegram_id, full_name, role, company, receives_meals, is_active, created_at, updated_at)
         VALUES ($1, $2, $3, 'GR', false, true, NOW(), NOW())
-        ON CONFLICT (telegram_id) DO NOTHING
+        ON CONFLICT (telegram_id)
+        DO UPDATE SET
+          role = EXCLUDED.role,
+          is_active = true,
+          updated_at = NOW()
       `,
       [telegramId, `Owner ${telegramId}`, USER_ROLES.OWNER]
     );
@@ -78,6 +118,8 @@ async function resolveAccessUser(profile, adminIds = []) {
         DO UPDATE SET
           full_name = EXCLUDED.full_name,
           username = EXCLUDED.username,
+          role = EXCLUDED.role,
+          is_active = true,
           updated_at = NOW()
       `,
       [profile.id, fullName, username, USER_ROLES.OWNER]
@@ -133,6 +175,7 @@ async function listDocumentReminderRecipients() {
       FROM app_users
       WHERE is_active = true
         AND role IN ($1, $2)
+        AND NOT (company = 'RS' AND receives_meals = true AND role = $2)
       ORDER BY role ASC, full_name ASC, telegram_id ASC
     `,
     [USER_ROLES.OWNER, USER_ROLES.CLIENT_VIEWER]
@@ -142,6 +185,10 @@ async function listDocumentReminderRecipients() {
 
 async function upsertUser({ telegramId, fullName, username = null, role, company = "GR", receivesMeals = false, employeeId = null }) {
   const normalizedRole = normalizeRole(role);
+  if (receivesMeals && employeeId) {
+    await assertEmployeeLinkAvailable({ employeeId, telegramId });
+  }
+
   const { rows } = await pool.query(
     `
       INSERT INTO app_users (telegram_id, full_name, username, role, company, receives_meals, employee_id, is_active, created_at, updated_at)
@@ -183,6 +230,10 @@ async function updateUserRole(userId, role) {
 }
 
 async function updateUserRsSettings(userId, { receivesMeals, employeeId = null }) {
+  if (receivesMeals && employeeId) {
+    await assertEmployeeLinkAvailable({ employeeId, userId });
+  }
+
   const { rows } = await pool.query(
     `
       UPDATE app_users
@@ -194,7 +245,7 @@ async function updateUserRsSettings(userId, { receivesMeals, employeeId = null }
     `,
     [userId, Boolean(receivesMeals), employeeId]
   );
-  return rows[0] || null;
+  return applyRuntimeAccessRole(rows[0] || null);
 }
 
 async function toggleUserActive(userId) {
