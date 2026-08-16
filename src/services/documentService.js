@@ -1,4 +1,5 @@
-﻿const path = require("path");
+const path = require("path");
+const { randomUUID } = require("crypto");
 const config = require("../config");
 const pool = require("../db/pool");
 const {
@@ -10,13 +11,13 @@ const { createReconciliationDocx } = require("../docs/createReconciliationDocx")
 const { buildReconciliationData, getReconciliationPeriodBounds } = require("./ledgerService");
 const { getLegacyMaxActNumber } = require("./legacySettlementService");
 const { getActSummaryForPeriod, getMonthlyActSummary } = require("./mealService");
-const { getMonthUploadedDocument } = require("./monthDocumentService");
+const { getMonthUploadedDocument, upsertMonthUploadedDocument } = require("./monthDocumentService");
 const {
   getCustomerDetails,
   getDocumentSettings,
   getPerformerDetails
 } = require("./settingsService");
-const { buildFilePath, ensureDir, sanitizeFileName } = require("../utils/files");
+const { buildFilePath, ensureDir, sanitizeFileName, unlinkIfExists } = require("../utils/files");
 const { formatDateRu, getMonthRange, isFullMonthPeriod, monthYearLabel, todayIso } = require("../utils/dateHelpers");
 
 const ACT_NUMBER_LOCK_KEY = 472021;
@@ -247,6 +248,108 @@ async function attachSignedDocument(documentId, signedFilePath, uploadedByUserId
   return rows[0] || null;
 }
 
+async function attachMonthSignedDocument({
+  docType,
+  year,
+  month,
+  signedFilePath,
+  uploadedByUserId = null,
+  preferredDocumentId = null
+}, db = pool) {
+  const { startDate, endDate } = getMonthRange(month, year);
+  const { rows } = await db.query(
+    `
+      WITH candidate AS (
+        SELECT id
+        FROM generated_documents
+        WHERE doc_type = $1
+          AND (
+            (
+              $1 = 'act'
+              AND (
+                (act_year = $2 AND act_month = $3)
+                OR (period_start::DATE = $4::DATE AND period_end::DATE = $5::DATE)
+              )
+            )
+            OR (
+              $1 = 'reconciliation'
+              AND EXTRACT(YEAR FROM period_end)::INT = $2
+              AND EXTRACT(MONTH FROM period_end)::INT = $3
+            )
+          )
+          AND ($6::BIGINT IS NULL OR id = $6)
+        ORDER BY
+          signed_file_path IS NOT NULL DESC,
+          CASE
+            WHEN document_number ~ '^[0-9]+$' THEN document_number::BIGINT
+            ELSE NULL
+          END ASC NULLS LAST,
+          id DESC
+        LIMIT 1
+      )
+      UPDATE generated_documents
+      SET signed_file_path = $7,
+          status = 'signed',
+          uploaded_signed_by_user_id = $8,
+          uploaded_signed_at = NOW(),
+          updated_at = NOW()
+      WHERE id = (SELECT id FROM candidate)
+      RETURNING *
+    `,
+    [
+      docType,
+      year,
+      month,
+      startDate,
+      endDate,
+      preferredDocumentId,
+      signedFilePath,
+      uploadedByUserId
+    ]
+  );
+
+  return rows[0] || null;
+}
+
+async function saveMonthSignedDocument({
+  docType,
+  year,
+  month,
+  signedFilePath,
+  originalFileName = null,
+  userId = null,
+  preferredDocumentId = null
+}) {
+  await getMonthUploadedDocument(docType, year, month);
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const linkedDocument = await attachMonthSignedDocument({
+      docType,
+      year,
+      month,
+      signedFilePath,
+      uploadedByUserId: userId,
+      preferredDocumentId
+    }, client);
+    const monthDocument = await upsertMonthUploadedDocument({
+      docKind: docType,
+      year,
+      month,
+      signedFilePath,
+      originalFileName,
+      userId
+    }, client);
+    await client.query("COMMIT");
+    return { linkedDocument, monthDocument };
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 async function clearSignedDocument(documentId) {
   const { rows } = await pool.query(
     `
@@ -302,7 +405,7 @@ async function findCanonicalActForPeriod(startDate, endDate, db = pool) {
         AND period_end::DATE = $2::DATE
         AND document_number ~ '^[0-9]+$'
         AND document_number::BIGINT > $3
-      ORDER BY document_number::BIGINT ASC, id ASC
+      ORDER BY signed_file_path IS NOT NULL DESC, document_number::BIGINT ASC, id ASC
       LIMIT 1
     `,
     [startDate, endDate, legacyMaxActNumber]
@@ -315,34 +418,24 @@ async function getNextActNumber(db = pool) {
   const legacyMaxActNumber = getLegacyMaxActNumber();
   const { rows } = await db.query(
     `
-      WITH canonical_period_acts AS (
-        SELECT DISTINCT ON (all_acts.period_start, all_acts.period_end)
-          all_acts.document_number::BIGINT AS document_number
-        FROM (
-          SELECT DISTINCT period_start::DATE AS period_start, period_end::DATE AS period_end
-          FROM generated_documents
-          WHERE doc_type = 'act'
-            AND signed_file_path IS NOT NULL
-        ) signed_periods
-        JOIN (
-          SELECT document_number, period_start::DATE AS period_start, period_end::DATE AS period_end, id
-          FROM generated_documents
-          WHERE doc_type = 'act'
-            AND document_number ~ '^[0-9]+$'
-            AND document_number::BIGINT > $1
-        ) all_acts
-        ON all_acts.period_start = signed_periods.period_start
-          AND all_acts.period_end = signed_periods.period_end
-        ORDER BY all_acts.period_start, all_acts.period_end, all_acts.document_number::BIGINT ASC, all_acts.id ASC
-      )
-      SELECT COALESCE(MAX(document_number), $1) AS numeric_max
-      FROM canonical_period_acts
-    `
-    ,
+      SELECT COALESCE(MAX(document_number::BIGINT), $1) AS numeric_max
+      FROM generated_documents
+      WHERE doc_type = 'act'
+        AND document_number ~ '^[0-9]+$'
+        AND document_number::BIGINT > $1
+    `,
     [legacyMaxActNumber]
   );
 
   return String(Number(rows[0]?.numeric_max || legacyMaxActNumber) + 1);
+}
+
+function buildGeneratedFileName(baseName) {
+  const sanitized = sanitizeFileName(baseName);
+  const extension = path.extname(sanitized);
+  const stem = extension ? sanitized.slice(0, -extension.length) : sanitized;
+  const suffix = `${Date.now()}_${randomUUID().slice(0, 8)}`;
+  return `${stem}_${suffix}${extension}`;
 }
 
 function buildActServiceDescription(serviceName, startDate, endDate) {
@@ -393,14 +486,15 @@ async function generateMonthlyAct({
   const periodText = buildActPeriodText(summary.startDate, summary.endDate);
 
   const client = await pool.connect();
+  let filePath = null;
   try {
     await client.query("BEGIN");
     await client.query("SELECT pg_advisory_xact_lock($1)", [ACT_NUMBER_LOCK_KEY]);
 
     const existingPeriodAct = await findCanonicalActForPeriod(summary.startDate, summary.endDate, client);
     const resolvedActNumber = String(actNumber || existingPeriodAct?.document_number || await getNextActNumber(client)).trim();
-    const fileName = sanitizeFileName(`act_${effectiveYear}_${String(effectiveMonth).padStart(2, "0")}_${resolvedActNumber}.docx`);
-    const filePath = buildFilePath(config.documentsDir, fileName);
+    const fileName = buildGeneratedFileName(`act_${effectiveYear}_${String(effectiveMonth).padStart(2, "0")}_${resolvedActNumber}.docx`);
+    filePath = buildFilePath(config.documentsDir, fileName);
 
     await createActDocx(filePath, {
       actDate,
@@ -472,6 +566,7 @@ async function generateMonthlyAct({
     };
   } catch (error) {
     await client.query("ROLLBACK");
+    await unlinkIfExists(filePath);
     throw error;
   } finally {
     client.release();
@@ -503,35 +598,40 @@ async function generateReconciliationDocument({
     includeUnsignedPreviousMonth
   });
 
-  const fileName = sanitizeFileName(`reconciliation_${effectiveStartDate}_${effectiveEndDate}.docx`);
+  const fileName = buildGeneratedFileName(`reconciliation_${effectiveStartDate}_${effectiveEndDate}.docx`);
   const filePath = path.join(config.documentsDir, fileName);
 
-  await createReconciliationDocx(filePath, {
-    ...reconciliation,
-    customer,
-    performer
-  });
+  try {
+    await createReconciliationDocx(filePath, {
+      ...reconciliation,
+      customer,
+      performer
+    });
 
-  const record = await createDocumentRecord({
-    docType: DOCUMENT_TYPES.RECONCILIATION,
-    documentDate,
-    periodStart: reconciliation.periodStart,
-    periodEnd: reconciliation.periodEnd,
-    totalAmount: reconciliation.chargedTotal,
-    openingBalance: reconciliation.openingBalance,
-    chargedTotal: reconciliation.chargedTotal,
-    paidTotal: reconciliation.paidTotal,
-    closingBalance: reconciliation.closingBalance,
-    generatedFilePath: filePath,
-    createdByUserId: userId,
-    note: reconciliation.note
-  });
+    const record = await createDocumentRecord({
+      docType: DOCUMENT_TYPES.RECONCILIATION,
+      documentDate,
+      periodStart: reconciliation.periodStart,
+      periodEnd: reconciliation.periodEnd,
+      totalAmount: reconciliation.chargedTotal,
+      openingBalance: reconciliation.openingBalance,
+      chargedTotal: reconciliation.chargedTotal,
+      paidTotal: reconciliation.paidTotal,
+      closingBalance: reconciliation.closingBalance,
+      generatedFilePath: filePath,
+      createdByUserId: userId,
+      note: reconciliation.note
+    });
 
-  return {
-    ...record,
-    filePath,
-    reconciliation
-  };
+    return {
+      ...record,
+      filePath,
+      reconciliation
+    };
+  } catch (error) {
+    await unlinkIfExists(filePath);
+    throw error;
+  }
 }
 
 module.exports = {
@@ -544,5 +644,6 @@ module.exports = {
   getMonthDocuments,
   hasDocumentsInYear,
   listDocuments,
-  markDocumentSent
+  markDocumentSent,
+  saveMonthSignedDocument
 };

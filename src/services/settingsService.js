@@ -38,7 +38,8 @@ async function getMonthlyDocumentReminderSettings() {
   const settings = await getSetting(APP_SETTING_KEYS.MONTHLY_DOCUMENT_REMINDER);
   return {
     day: Number(settings?.day || 0),
-    lastPromptDate: settings?.lastPromptDate || null
+    lastPromptDate: settings?.lastPromptDate || null,
+    lastPromptPeriod: settings?.lastPromptPeriod || null
   };
 }
 

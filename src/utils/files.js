@@ -25,6 +25,9 @@ function buildFilePath(baseDir, fileName) {
 }
 
 function unlinkIfExists(targetPath) {
+  if (!targetPath) {
+    return Promise.resolve();
+  }
   return fs.promises.unlink(targetPath).catch(() => undefined);
 }
 
@@ -83,5 +86,6 @@ module.exports = {
   buildFilePath,
   downloadFile,
   ensureDir,
-  sanitizeFileName
+  sanitizeFileName,
+  unlinkIfExists
 };

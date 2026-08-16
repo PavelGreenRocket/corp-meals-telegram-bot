@@ -58,9 +58,9 @@ async function upsertMonthUploadedDocument({
   signedFilePath,
   originalFileName = null,
   userId = null
-}) {
+}, db = pool) {
   await ensureMonthDocumentsTable();
-  const { rows } = await pool.query(
+  const { rows } = await db.query(
     `
       INSERT INTO month_uploaded_documents (
         doc_kind,

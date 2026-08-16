@@ -4,30 +4,9 @@ const {
   updateMonthlyDocumentReminderSettings
 } = require("./settingsService");
 const { listDocumentReminderRecipients } = require("./userService");
-const { monthYearLabel } = require("../utils/dateHelpers");
+const { getCurrentDateParts, getPreviousMonthParts, monthYearLabel } = require("../utils/dateHelpers");
 
 const CHECK_INTERVAL_MS = 60 * 60 * 1000;
-
-function getTodayParts() {
-  const now = new Date();
-  return {
-    day: now.getDate(),
-    isoDate: [
-      now.getFullYear(),
-      String(now.getMonth() + 1).padStart(2, "0"),
-      String(now.getDate()).padStart(2, "0")
-    ].join("-")
-  };
-}
-
-function getPreviousMonthParts() {
-  const now = new Date();
-  const previous = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-  return {
-    month: previous.getMonth() + 1,
-    year: previous.getFullYear()
-  };
-}
 
 async function sendReminderIfNeeded(bot, options = {}) {
   const force = Boolean(options.force);
@@ -36,8 +15,14 @@ async function sendReminderIfNeeded(bot, options = {}) {
     return;
   }
 
-  const today = getTodayParts();
-  if (!force && (settings.day !== today.day || settings.lastPromptDate === today.isoDate)) {
+  const today = getCurrentDateParts();
+  const previousMonth = getPreviousMonthParts();
+  const promptPeriod = `${previousMonth.year}-${String(previousMonth.month).padStart(2, "0")}`;
+  const promptedThisMonth = settings.lastPromptDate
+    && String(settings.lastPromptDate).slice(0, 7) === today.isoDate.slice(0, 7);
+  const alreadyPrompted = settings.lastPromptPeriod === promptPeriod
+    || (!settings.lastPromptPeriod && promptedThisMonth);
+  if (!force && (today.day < settings.day || alreadyPrompted)) {
     return;
   }
 
@@ -46,7 +31,6 @@ async function sendReminderIfNeeded(bot, options = {}) {
     return;
   }
 
-  const previousMonth = getPreviousMonthParts();
   const periodLabel = monthYearLabel(previousMonth.month, previousMonth.year);
   const text = [
     `Прошёл месяц: ${periodLabel}.`,
@@ -70,7 +54,10 @@ async function sendReminderIfNeeded(bot, options = {}) {
   }
 
   if (!force) {
-    await updateMonthlyDocumentReminderSettings({ lastPromptDate: today.isoDate });
+    await updateMonthlyDocumentReminderSettings({
+      lastPromptDate: today.isoDate,
+      lastPromptPeriod: promptPeriod
+    });
   }
 }
 

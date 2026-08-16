@@ -1,4 +1,4 @@
-﻿const path = require("path");
+const path = require("path");
 const { Input, Markup } = require("telegraf");
 const config = require("../config");
 const { DAILY_LIMIT, DOCUMENT_TYPES, USER_ROLES } = require("../constants");
@@ -14,7 +14,8 @@ const {
   getMonthDocuments,
   hasDocumentsInYear,
   listDocuments,
-  markDocumentSent
+  markDocumentSent,
+  saveMonthSignedDocument
 } = require("../services/documentService");
 const {
   getBalanceSummary,
@@ -24,7 +25,7 @@ const {
   getYearlyMonthlyTotals
 } = require("../services/ledgerService");
 const { createMealEntry, deleteMealEntry, getEmployeeSpentForDate, getMealEntryById, getMealSummary, listMealEntries, updateMealEntry } = require("../services/mealService");
-const { deleteMonthUploadedDocument, getMonthUploadedDocument, upsertMonthUploadedDocument } = require("../services/monthDocumentService");
+const { deleteMonthUploadedDocument, getMonthUploadedDocument } = require("../services/monthDocumentService");
 const { sendReminderIfNeeded } = require("../services/monthlyDocumentReminderService");
 const {
   getCustomerDetails,
@@ -41,6 +42,7 @@ const {
   endOfCurrentMonth,
   formatDateRu,
   formatDateShort,
+  getCurrentDateParts,
   getMonthRange,
   monthNameRu,
   monthYearLabel,
@@ -52,7 +54,7 @@ const {
   yesterdayIso
 } = require("../utils/dateHelpers");
 const { abbreviateFullName, formatAdvanceRowButton, formatMealRowButton } = require("../utils/display");
-const { buildFilePath, downloadFile, ensureDir } = require("../utils/files");
+const { buildFilePath, downloadFile, ensureDir, unlinkIfExists } = require("../utils/files");
 
 const PAGE_SIZE = 8;
 const QUICK_MEAL_AMOUNTS = [100, 150, 200, 250, 300];
@@ -96,6 +98,10 @@ function ensureSession(ctx) {
 
   if (!ctx.session.previewRole) {
     ctx.session.previewRole = null;
+  }
+
+  if (!ctx.session.baristaKind) {
+    ctx.session.baristaKind = null;
   }
 
   if (!ctx.session.reportMonth) {
@@ -933,10 +939,21 @@ async function sendMainMenu(ctx, note = null) {
   }
 
   if (getDisplayedRole(ctx) === USER_ROLES.BARISTA) {
+    if (!ctx.session.baristaKind) {
+      await showBaristaKindScreen(ctx, note);
+      return;
+    }
+
+    if (ctx.session.baristaKind === "railship" && !await getBaristaSelfEmployee(ctx)) {
+      await showBaristaSelfEmployeePicker(ctx, 0);
+      return;
+    }
+
     const lines = [];
     if (note) {
       lines.push(`<i>${escapeHtml(note)}</i>`);
     }
+    lines.push(lineHtml("Режим", getBaristaKindLabel(ctx.session.baristaKind)));
     if (isActualOwner(ctx) && ctx.session.previewRole) {
       lines.push(`<b>Тестовый просмотр:</b> <code>${escapeHtml(ctx.session.previewRole)}</code>`);
     }
@@ -987,6 +1004,67 @@ async function sendRoleScreen(ctx) {
     buildHtmlScreen("Тест роли", "Выберите режим отображения интерфейса", lines),
     rolePreviewKeyboard()
   );
+}
+
+function getBaristaKindLabel(kind) {
+  if (kind === "coffee") {
+    return "сотрудник кофейни";
+  }
+  if (kind === "railship") {
+    return "сотрудник РейлШип";
+  }
+  return "не выбран";
+}
+
+async function showBaristaKindScreen(ctx, note = null) {
+  const user = await getUserById(ctx.state.user.id);
+  const mealEmployee = user?.employee_id ? await getEmployeeById(user.employee_id) : null;
+  const lines = [];
+
+  if (note) {
+    lines.push(`<i>${escapeHtml(note)}</i>`, "");
+  }
+
+  lines.push(
+    lineHtml("Текущий режим", getBaristaKindLabel(ctx.session.baristaKind)),
+    lineHtml("Привязка РейлШип", mealEmployee?.full_name || "-")
+  );
+
+  await renderScreen(
+    ctx,
+    buildHtmlScreen("Режим бариста", "Выберите, как вы добавляете питание", lines),
+    buildRowsKeyboard([
+      [Markup.button.callback("Сотрудник кофейни", "barista:kind:coffee")],
+      [Markup.button.callback("Сотрудник РейлШип", "barista:kind:railship")],
+      [Markup.button.callback("🔙", "nav:home")]
+    ])
+  );
+}
+
+async function showBaristaSelfEmployeePicker(ctx, page = 0) {
+  const employees = await listEmployees({ activeOnly: true, limit: PAGE_SIZE + 1, offset: page * PAGE_SIZE });
+  const visible = employees.slice(0, PAGE_SIZE);
+  const hasMore = employees.length > PAGE_SIZE;
+
+  await renderScreen(
+    ctx,
+    buildHtmlScreen("Сотрудник РейлШип", "Выберите себя из списка питающихся"),
+    buildPagedKeyboard(visible, (employee) => employee.full_name, "barista:selfemployee", page, hasMore, [], "barista:mode")
+  );
+}
+
+async function getBaristaSelfEmployee(ctx) {
+  if (getDisplayedRole(ctx) !== USER_ROLES.BARISTA || ctx.session.baristaKind !== "railship") {
+    return null;
+  }
+
+  const user = await getUserById(ctx.state.user.id);
+  if (!user?.receives_meals || !user.employee_id) {
+    return null;
+  }
+
+  const employee = await getEmployeeById(user.employee_id);
+  return employee?.is_active ? employee : null;
 }
 
 async function sendMealsSection(ctx) {
@@ -1903,7 +1981,7 @@ async function handleSettingsFieldEdit(ctx, text) {
 async function handleMonthlyReminderDayEdit(ctx, text) {
   const value = String(text || "").trim();
   if (value === "-") {
-    await updateMonthlyDocumentReminderSettings({ day: 0, lastPromptDate: null });
+    await updateMonthlyDocumentReminderSettings({ day: 0, lastPromptDate: null, lastPromptPeriod: null });
     clearFlow(ctx);
     await showMonthlyReminderSettings(ctx);
     return;
@@ -1915,10 +1993,10 @@ async function handleMonthlyReminderDayEdit(ctx, text) {
     return;
   }
 
-  await updateMonthlyDocumentReminderSettings({ day, lastPromptDate: null });
+  await updateMonthlyDocumentReminderSettings({ day, lastPromptDate: null, lastPromptPeriod: null });
   clearFlow(ctx);
-  const todayDay = new Date().getDate();
-  if (day === todayDay) {
+  const todayDay = getCurrentDateParts().day;
+  if (day <= todayDay) {
     await sendReminderIfNeeded({ telegram: ctx.telegram });
   }
   await showMonthlyReminderSettings(ctx);
@@ -1968,9 +2046,21 @@ async function createUserFromFlow(ctx, flow) {
   await showUserDetail(ctx, user.id);
 }
 
-function buildMealAmountKeyboard() {
+function updateMealDatePart(mealDate, part, value) {
+  const parts = getIsoDateParts(mealDate);
+  parts[part] = Number(value);
+  return toIsoDate(parts);
+}
+
+function buildMealAmountKeyboard(mealDate) {
+  const dateParts = getIsoDateParts(mealDate || todayIso());
   return buildRowsKeyboard([
-    [Markup.button.callback("Выбрать другую дату", "meal:add:change_date")],
+    [
+      Markup.button.callback(formatPickerSegment(dateParts.day, "."), "meal:add:pickdate:day"),
+      Markup.button.callback(formatPickerSegment(dateParts.month, "."), "meal:add:pickdate:month"),
+      Markup.button.callback(formatPickerYearShort(dateParts.year), "meal:add:pickdate:year")
+    ],
+    [Markup.button.callback("300", "meal:amount:300")],
     [Markup.button.callback("🔙", "meal:add")]
   ]);
 }
@@ -2018,7 +2108,75 @@ async function promptMealAmount(ctx, employeeName, mealDate, employeeId, alertLi
   await renderScreen(
     ctx,
     buildHtmlScreen("Добавить питание", null, lines),
-    buildMealAmountKeyboard()
+    buildMealAmountKeyboard(mealDate)
+  );
+}
+
+async function promptMealDate(ctx, flow, subtitle = "Выберите дату записи", alertLines = []) {
+  const lines = [
+    lineHtml("Сотрудник", flow.data.employeeName),
+    lineHtml("Текущая дата", formatDateRu(flow.data.mealDate))
+  ];
+
+  if (alertLines.length) {
+    lines.push("", ...alertLines);
+  }
+
+  await renderScreen(
+    ctx,
+    buildHtmlScreen("Дата питания", subtitle, lines),
+    buildMealDateKeyboard()
+  );
+}
+
+async function showMealDatePartPicker(ctx, part) {
+  const flow = currentFlow(ctx);
+  if (!flow || flow.name !== "meal:add") {
+    await sendMainMenu(ctx);
+    return;
+  }
+
+  const activeDate = getIsoDateParts(flow.data.mealDate || todayIso());
+  const rows = [];
+
+  if (part === "day") {
+    const maxDay = getDaysInMonth(activeDate.year, activeDate.month);
+    for (let day = 1; day <= maxDay; day += 1) {
+      const label = day === activeDate.day ? `[${formatPickerSegment(day)}]` : formatPickerSegment(day);
+      const rowIndex = Math.floor((day - 1) / 7);
+      rows[rowIndex] = rows[rowIndex] || [];
+      rows[rowIndex].push(Markup.button.callback(label, `meal:add:setdate:day:${day}`));
+    }
+  } else if (part === "month") {
+    for (let month = 1; month <= 12; month += 1) {
+      const label = month === activeDate.month ? `[${formatPickerSegment(month)}]` : formatPickerSegment(month);
+      const rowIndex = Math.floor((month - 1) / 4);
+      rows[rowIndex] = rows[rowIndex] || [];
+      rows[rowIndex].push(Markup.button.callback(label, `meal:add:setdate:month:${month}`));
+    }
+  } else {
+    const baseYear = activeDate.year;
+    const years = Array.from({ length: 9 }, (_, index) => baseYear - 4 + index);
+    years.forEach((year, index) => {
+      const label = year === activeDate.year ? `[${year}]` : String(year);
+      const rowIndex = Math.floor(index / 3);
+      rows[rowIndex] = rows[rowIndex] || [];
+      rows[rowIndex].push(Markup.button.callback(label, `meal:add:setdate:year:${year}`));
+    });
+  }
+
+  rows.push([Markup.button.callback("🔙", "meal:add:amount_screen")]);
+  await renderScreen(
+    ctx,
+    buildHtmlScreen(
+      "Добавить питание",
+      `Выберите ${part === "day" ? "день" : part === "month" ? "месяц" : "год"} даты питания`,
+      [
+        lineHtml("Сотрудник", flow.data.employeeName),
+        lineHtml("Дата", formatDateRu(flow.data.mealDate))
+      ]
+    ),
+    buildRowsKeyboard(rows)
   );
 }
 
@@ -2223,7 +2381,7 @@ async function handleTextFlow(ctx, text) {
   }
 
   if (flow.name === "meal:add") {
-    if (flow.step === "date_custom") {
+    if (flow.step === "date" || flow.step === "date_custom") {
       const mealDate = parseDateInput(text);
       if (!mealDate) {
         await renderScreen(
@@ -2241,6 +2399,15 @@ async function handleTextFlow(ctx, text) {
 
     if (flow.step === "amount") {
       const amount = parseAmount(text);
+      const mealDate = parseDateInput(text);
+      if (!amount && mealDate) {
+        flow.data.mealDate = mealDate;
+        flow.step = "amount";
+        await promptMealAmount(ctx, flow.data.employeeName, flow.data.mealDate, flow.data.employeeId, [
+          "<b>❗ Похоже, это дата. Я обновил дату записи - теперь введите сумму</b>"
+        ]);
+        return;
+      }
       await saveMealFromFlow(ctx, flow, amount);
       return;
     }
@@ -2523,14 +2690,20 @@ async function handleDocumentUpload(ctx) {
     const link = await ctx.telegram.getFileLink(ctx.message.document.file_id);
 
     await downloadFile(String(link), safePath);
-    await upsertMonthUploadedDocument({
-      docKind,
-      year,
-      month,
-      signedFilePath: safePath,
-      originalFileName: fileName,
-      userId: ctx.state.user.id
-    });
+    try {
+      await saveMonthSignedDocument({
+        docType: docKind,
+        year,
+        month,
+        signedFilePath: safePath,
+        originalFileName: fileName,
+        userId: ctx.state.user.id,
+        preferredDocumentId: flow.data.preferredDocumentId || null
+      });
+    } catch (error) {
+      await unlinkIfExists(safePath);
+      throw error;
+    }
 
     clearFlow(ctx);
     await showClientMonthDetails(ctx, month, year);
@@ -2904,7 +3077,73 @@ function registerHandlers(bot) {
 
     const value = ctx.match[1];
     ctx.session.previewRole = value === "reset" ? null : value;
+    ctx.session.baristaKind = null;
+    if (value === "barista") {
+      await showBaristaKindScreen(ctx, "Роль переключена.");
+      return;
+    }
+
     await sendMainMenu(ctx, "Роль переключена.");
+  }));
+
+  bot.action("barista:mode", withError(async (ctx) => {
+    await answerCb(ctx);
+    await showBaristaKindScreen(ctx);
+  }));
+
+  bot.action(/barista:kind:(coffee|railship)/, withError(async (ctx) => {
+    await answerCb(ctx);
+    if (getDisplayedRole(ctx) !== USER_ROLES.BARISTA) {
+      await answerCb(ctx, "Режим доступен только бариста");
+      return;
+    }
+
+    ctx.session.baristaKind = ctx.match[1];
+    if (ctx.session.baristaKind === "coffee") {
+      await sendMainMenu(ctx, "Режим: сотрудник кофейни.");
+      return;
+    }
+
+    const employee = await getBaristaSelfEmployee(ctx);
+    if (employee) {
+      await sendMainMenu(ctx, `Режим: сотрудник РейлШип (${employee.full_name}).`);
+      return;
+    }
+
+    await showBaristaSelfEmployeePicker(ctx, 0);
+  }));
+
+  bot.action(/barista:selfemployee:page:(\d+)/, withError(async (ctx) => {
+    await answerCb(ctx);
+    if (getDisplayedRole(ctx) !== USER_ROLES.BARISTA) {
+      await answerCb(ctx, "Недоступно");
+      return;
+    }
+
+    ctx.session.baristaKind = "railship";
+    await showBaristaSelfEmployeePicker(ctx, Number(ctx.match[1]));
+  }));
+
+  bot.action(/barista:selfemployee:(\d+)/, withError(async (ctx) => {
+    await answerCb(ctx);
+    if (getDisplayedRole(ctx) !== USER_ROLES.BARISTA) {
+      await answerCb(ctx, "Недоступно");
+      return;
+    }
+
+    const employee = await getEmployeeById(Number(ctx.match[1]));
+    if (!employee || !employee.is_active) {
+      await answerCb(ctx, "Сотрудник недоступен");
+      return;
+    }
+
+    ctx.session.baristaKind = "railship";
+    const updated = await updateUserRsSettings(ctx.state.user.id, {
+      receivesMeals: true,
+      employeeId: employee.id
+    });
+    ctx.state.user = updated || ctx.state.user;
+    await sendMainMenu(ctx, `Вы привязаны к ${employee.full_name}.`);
   }));
 
   bot.action("employee:add", withError(async (ctx) => {
@@ -3289,7 +3528,7 @@ function registerHandlers(bot) {
       return;
     }
 
-    await updateMonthlyDocumentReminderSettings({ day: 0, lastPromptDate: null });
+    await updateMonthlyDocumentReminderSettings({ day: 0, lastPromptDate: null, lastPromptPeriod: null });
     await showMonthlyReminderSettings(ctx);
   }));
 
@@ -3334,6 +3573,24 @@ function registerHandlers(bot) {
     if (!hasDisplayedRole(ctx, USER_ROLES.OWNER, USER_ROLES.BARISTA)) {
       await answerCb(ctx, "Недостаточно прав");
       return;
+    }
+
+    if (getDisplayedRole(ctx) === USER_ROLES.BARISTA) {
+      if (!ctx.session.baristaKind) {
+        await showBaristaKindScreen(ctx);
+        return;
+      }
+
+      if (ctx.session.baristaKind === "railship") {
+        const employee = await getBaristaSelfEmployee(ctx);
+        if (!employee) {
+          await showBaristaSelfEmployeePicker(ctx, 0);
+          return;
+        }
+
+        await startMealAddForEmployee(ctx, employee);
+        return;
+      }
     }
 
     const recent = await listRecentEmployees(4);
@@ -3413,14 +3670,25 @@ function registerHandlers(bot) {
     }
 
     flow.step = "date";
-    await renderScreen(
-      ctx,
-      buildHtmlScreen("Дата питания", "Выберите дату записи", [
-        lineHtml("Сотрудник", flow.data.employeeName),
-        lineHtml("Текущая дата", formatDateRu(flow.data.mealDate))
-      ]),
-      buildMealDateKeyboard()
-    );
+    await promptMealDate(ctx, flow);
+  }));
+
+  bot.action(/meal:add:pickdate:(day|month|year)/, withError(async (ctx) => {
+    await answerCb(ctx);
+    await showMealDatePartPicker(ctx, ctx.match[1]);
+  }));
+
+  bot.action(/meal:add:setdate:(day|month|year):(\d{1,4})/, withError(async (ctx) => {
+    await answerCb(ctx);
+    const flow = currentFlow(ctx);
+    if (!flow || flow.name !== "meal:add") {
+      await sendMainMenu(ctx);
+      return;
+    }
+
+    flow.data.mealDate = updateMealDatePart(flow.data.mealDate || todayIso(), ctx.match[1], ctx.match[2]);
+    flow.step = "amount";
+    await promptMealAmount(ctx, flow.data.employeeName, flow.data.mealDate, flow.data.employeeId);
   }));
 
   bot.action(/meal:amount:(custom|\d+)/, withError(async (ctx) => {
@@ -3788,7 +4056,26 @@ function registerHandlers(bot) {
 
   bot.action(/doc:act:month:(\d{4}):(\d{1,2})/, withError(async (ctx) => {
     await answerCb(ctx);
-    await showDocumentPeriodScreen(ctx, "act", getDocumentMonthPeriod("current"));
+    const year = Number(ctx.match[1]);
+    const month = Number(ctx.match[2]);
+    if (month < 1 || month > 12) {
+      await answerCb(ctx, "Некорректный месяц");
+      return;
+    }
+
+    const current = getCurrentMonthYear();
+    const previous = getAdjacentMonth(current.month, current.year, -1);
+    const selectedPreset = year === current.year && month === current.month
+      ? "current"
+      : year === previous.year && month === previous.month
+        ? "previous"
+        : "custom";
+    await showDocumentPeriodScreen(ctx, "act", {
+      ...getMonthRange(month, year),
+      month,
+      year,
+      selectedPreset
+    });
   }));
 
   bot.action("doc:act:apply", withError(async (ctx) => {
@@ -3933,9 +4220,12 @@ function registerHandlers(bot) {
     const docKind = ctx.match[1];
     const year = Number(ctx.match[2]);
     const month = Number(ctx.match[3]);
+    const documents = await getMonthDocuments(month, year);
+    const displayedDocument = docKind === DOCUMENT_TYPES.ACT ? documents.act : documents.reconciliation;
     setFlow(ctx, "doc:upload_signed", "document", {
       uploadMode: "month",
       docKind,
+      preferredDocumentId: displayedDocument && !displayedDocument.is_month_upload ? displayedDocument.id : null,
       returnTo: "client_month",
       year,
       month
