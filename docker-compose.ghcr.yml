@@ -1,0 +1,3 @@
+services:
+  bot:
+    image: ghcr.io/pavelgreenrocket/corp-meals-telegram-bot:${DEPLOY_IMAGE_TAG:-production}
