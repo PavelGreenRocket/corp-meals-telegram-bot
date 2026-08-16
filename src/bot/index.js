@@ -178,7 +178,6 @@ function createBot() {
         const flowEmployeeId = getFlowEmployeeId(flow);
         if (
           (flow?.name === "meal:add" || flow?.name?.startsWith("meal:edit")) &&
-          flowEmployeeId &&
           flowEmployeeId !== Number(accessUser.employee_id || 0)
         ) {
           ctx.session.flow = null;
