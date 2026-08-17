@@ -711,6 +711,8 @@ async function generateAndSendMonthlyDocumentBundle(ctx, year, month) {
     userId: ctx.state.user.id
   });
   const reconciliation = await generateReconciliationDocument({
+    startDate,
+    endDate,
     includeUnsignedPreviousMonth: true,
     userId: ctx.state.user.id
   });
