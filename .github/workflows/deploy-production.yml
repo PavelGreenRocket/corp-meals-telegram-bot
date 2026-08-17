@@ -3,9 +3,6 @@ name: Deploy Corp Meals Production
 run-name: "Deploy Corp Meals Production — ${{ github.sha }}"
 
 on:
-  push:
-    branches:
-      - production
   workflow_dispatch:
 
 permissions:
