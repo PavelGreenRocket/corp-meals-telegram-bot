@@ -13,6 +13,7 @@ function assertIncludes(content, fragment, message) {
 const userService = read("src/services/userService.js");
 const mealService = read("src/services/mealService.js");
 const botIndex = read("src/bot/index.js");
+const railshipHandlers = read("src/bot/railshipHandlers.js");
 
 assertIncludes(
   userService,
@@ -42,6 +43,18 @@ assertIncludes(
   botIndex,
   "Привязка сотрудника задаётся администратором",
   "Self-service employee selection must stay disabled"
+);
+
+assertIncludes(
+mealService,
+"COUNT(DISTINCT (meal_date, employee_id)) AS days_count",
+"Meal days must count unique employee/date pairs"
+);
+
+assertIncludes(
+railshipHandlers,
+"startDate,\n    endDate,\n    includeUnsignedPreviousMonth: true",
+"Monthly reconciliation bundle must use the selected month bounds"
 );
 
 console.log("Security invariant checks passed.");
