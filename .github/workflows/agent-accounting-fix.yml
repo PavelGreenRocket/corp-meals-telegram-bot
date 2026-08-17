@@ -33,16 +33,8 @@ jobs:
 
           handlers = Path('src/bot/railshipHandlers.js')
           text = handlers.read_text(encoding='utf-8')
-          old = '''  const reconciliation = await generateReconciliationDocument({
-            includeUnsignedPreviousMonth: true,
-            userId: ctx.state.user.id
-          });'''
-          new = '''  const reconciliation = await generateReconciliationDocument({
-            startDate,
-            endDate,
-            includeUnsignedPreviousMonth: true,
-            userId: ctx.state.user.id
-          });'''
+          old = "  const reconciliation = await generateReconciliationDocument({\n    includeUnsignedPreviousMonth: true,\n    userId: ctx.state.user.id\n  });"
+          new = "  const reconciliation = await generateReconciliationDocument({\n    startDate,\n    endDate,\n    includeUnsignedPreviousMonth: true,\n    userId: ctx.state.user.id\n  });"
           if old not in text:
               raise SystemExit('monthly reconciliation target not found')
           handlers.write_text(text.replace(old, new, 1), encoding='utf-8')
@@ -52,27 +44,30 @@ jobs:
           marker = 'const botIndex = read("src/bot/index.js");\n'
           if marker not in text:
               raise SystemExit('check file import marker not found')
-          text = text.replace(marker, marker + 'const railshipHandlers = read("src/bot/railshipHandlers.js");\n', 1)
+          if 'const railshipHandlers = read("src/bot/railshipHandlers.js");' not in text:
+              text = text.replace(marker, marker + 'const railshipHandlers = read("src/bot/railshipHandlers.js");\n', 1)
           marker = 'console.log("Security invariant checks passed.");'
           additions = '''assertIncludes(
-            mealService,
-            "COUNT(DISTINCT (meal_date, employee_id)) AS days_count",
-            "Meal days must count unique employee/date pairs"
+          mealService,
+          "COUNT(DISTINCT (meal_date, employee_id)) AS days_count",
+          "Meal days must count unique employee/date pairs"
           );
 
           assertIncludes(
-            railshipHandlers,
-            "startDate,\\n    endDate,\\n    includeUnsignedPreviousMonth: true",
-            "Monthly reconciliation bundle must use the selected month bounds"
+          railshipHandlers,
+          "startDate,\\n    endDate,\\n    includeUnsignedPreviousMonth: true",
+          "Monthly reconciliation bundle must use the selected month bounds"
           );
 
           '''
-          if marker not in text:
-              raise SystemExit('check file footer marker not found')
-          checks.write_text(text.replace(marker, additions + marker, 1), encoding='utf-8')
+          if 'Meal days must count unique employee/date pairs' not in text:
+              if marker not in text:
+                  raise SystemExit('check file footer marker not found')
+              text = text.replace(marker, additions + marker, 1)
+          checks.write_text(text, encoding='utf-8')
           PY
 
-          rm .github/workflows/agent-accounting-fix.yml
+          rm -f .github/workflows/agent-accounting-fix.yml
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
