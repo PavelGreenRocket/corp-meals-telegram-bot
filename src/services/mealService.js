@@ -219,7 +219,7 @@ async function getMealSummary({ startDate = null, endDate = null, createdByUserI
     `
       SELECT
         COALESCE(SUM(amount), 0) AS total_amount,
-        COUNT(DISTINCT meal_date) AS days_count,
+        COUNT(DISTINCT (meal_date, employee_id)) AS days_count,
         COUNT(*) AS entries_count
       FROM meal_entries
       ${whereClause}
