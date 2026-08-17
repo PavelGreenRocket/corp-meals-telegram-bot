@@ -1,0 +1,81 @@
+name: Agent accounting fix
+
+on:
+  push:
+    branches:
+      - agent/fix-accounting-periods
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: agent/fix-accounting-periods
+          fetch-depth: 0
+
+      - name: Apply accounting fixes
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          meal = Path('src/services/mealService.js')
+          text = meal.read_text(encoding='utf-8')
+          old = 'COUNT(DISTINCT meal_date) AS days_count,'
+          new = 'COUNT(DISTINCT (meal_date, employee_id)) AS days_count,'
+          if old not in text:
+              raise SystemExit('meal day-count target not found')
+          meal.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          handlers = Path('src/bot/railshipHandlers.js')
+          text = handlers.read_text(encoding='utf-8')
+          old = '''  const reconciliation = await generateReconciliationDocument({
+            includeUnsignedPreviousMonth: true,
+            userId: ctx.state.user.id
+          });'''
+          new = '''  const reconciliation = await generateReconciliationDocument({
+            startDate,
+            endDate,
+            includeUnsignedPreviousMonth: true,
+            userId: ctx.state.user.id
+          });'''
+          if old not in text:
+              raise SystemExit('monthly reconciliation target not found')
+          handlers.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          checks = Path('scripts/check-security-invariants.js')
+          text = checks.read_text(encoding='utf-8')
+          marker = 'const botIndex = read("src/bot/index.js");\n'
+          if marker not in text:
+              raise SystemExit('check file import marker not found')
+          text = text.replace(marker, marker + 'const railshipHandlers = read("src/bot/railshipHandlers.js");\n', 1)
+          marker = 'console.log("Security invariant checks passed.");'
+          additions = '''assertIncludes(
+            mealService,
+            "COUNT(DISTINCT (meal_date, employee_id)) AS days_count",
+            "Meal days must count unique employee/date pairs"
+          );
+
+          assertIncludes(
+            railshipHandlers,
+            "startDate,\\n    endDate,\\n    includeUnsignedPreviousMonth: true",
+            "Monthly reconciliation bundle must use the selected month bounds"
+          );
+
+          '''
+          if marker not in text:
+              raise SystemExit('check file footer marker not found')
+          checks.write_text(text.replace(marker, additions + marker, 1), encoding='utf-8')
+          PY
+
+          rm .github/workflows/agent-accounting-fix.yml
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/services/mealService.js src/bot/railshipHandlers.js scripts/check-security-invariants.js .github/workflows/agent-accounting-fix.yml
+          git commit -m "Fix accounting day count and reconciliation period"
+          git push origin HEAD:agent/fix-accounting-periods
