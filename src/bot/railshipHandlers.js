@@ -329,6 +329,9 @@ function buildClientDashboardFooter(ctx) {
       Markup.button.callback("➕ Добавить питание", "meal:add")
     ]);
     rows.push([
+      Markup.button.callback("📎 Загрузить отчёт Excel", "meal:import_report")
+    ]);
+    rows.push([
       Markup.button.callback("⚙️ Настройки", "nav:settings"),
       Markup.button.callback("🔄 Обновить", "client:home:refresh")
     ]);
@@ -3864,10 +3867,13 @@ function registerHandlers(bot) {
     const merged = [...recent, ...all.filter((employee) => !recent.some((item) => item.id === employee.id))].slice(0, PAGE_SIZE);
 
     setFlow(ctx, "meal:add_pick_employee", "pick", {});
+    const extraRows = getDisplayedRole(ctx) === USER_ROLES.OWNER
+      ? [[Markup.button.callback("📎 Загрузить отчёт Excel", "meal:import_report")]]
+      : [];
     await renderScreen(
       ctx,
       buildHtmlScreen("Добавить питание", "Выберите сотрудника для записи"),
-      buildPagedKeyboard(merged, (employee) => employee.full_name, "meal:pickemployee", 0, false, [], "nav:home")
+      buildPagedKeyboard(merged, (employee) => employee.full_name, "meal:pickemployee", 0, false, extraRows, "nav:home")
     );
   }));
 
