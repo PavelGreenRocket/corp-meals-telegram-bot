@@ -263,52 +263,43 @@ async function getReconciliationPeriodBounds(documentDate = todayIso(), options 
 
   const { rows } = await pool.query(
     `
-      WITH effective_acts AS (
-        SELECT DISTINCT ON (act_year, act_month)
-          document_date
-        FROM (
-          SELECT act_year, act_month, document_date, uploaded_signed_at, id
-          FROM generated_documents
-          WHERE doc_type = 'act'
-            AND signed_file_path IS NOT NULL
-            AND document_date <= $1
-          UNION ALL
-          SELECT
-            doc_year AS act_year,
-            doc_month AS act_month,
-            (make_date(doc_year, doc_month, 1) + INTERVAL '1 month - 1 day')::DATE AS document_date,
-            updated_at AS uploaded_signed_at,
-            id
-          FROM month_uploaded_documents
-          WHERE doc_kind = 'act'
-            AND (make_date(doc_year, doc_month, 1) + INTERVAL '1 month - 1 day')::DATE <= $1
-        ) acts
-        ORDER BY act_year, act_month, uploaded_signed_at DESC NULLS LAST, id DESC
+      WITH charge_dates AS (
+        SELECT document_date::DATE AS operation_date
+        FROM generated_documents
+        WHERE doc_type = 'act'
+          AND document_date <= $1
+
+        UNION
+
+        SELECT (make_date(doc_year, doc_month, 1) + INTERVAL '1 month - 1 day')::DATE AS operation_date
+        FROM month_uploaded_documents
+        WHERE doc_kind = 'act'
+          AND (make_date(doc_year, doc_month, 1) + INTERVAL '1 month - 1 day')::DATE <= $1
+
+        UNION
+
+        SELECT (date_trunc('month', meal_date) + INTERVAL '1 month - 1 day')::DATE AS operation_date
+        FROM meal_entries
+        WHERE meal_date <= $1
+        GROUP BY date_trunc('month', meal_date)
       )
-      SELECT
-        MIN(operation_date) AS start_date,
-        MAX(operation_date) AS end_date
+      SELECT MIN(operation_date) AS start_date
       FROM (
         SELECT payment_date AS operation_date
         FROM advances
         WHERE payment_date <= $1
         UNION ALL
-        SELECT document_date AS operation_date
-        FROM effective_acts
-        UNION ALL
-        SELECT $2::DATE AS operation_date
-        WHERE $3::BOOLEAN
+        SELECT operation_date
+        FROM charge_dates
       ) history
     `,
-    [normalizedDocumentDate, unsignedPreviousMonth?.documentDate || null, Boolean(unsignedPreviousMonth)]
+    [normalizedDocumentDate]
   );
 
   const dbStartDate = normalizeIsoDateValue(rows[0]?.start_date);
-  const dbEndDate = normalizeIsoDateValue(rows[0]?.end_date);
   const legacyStartDate = legacyDateCandidates[0] || null;
-  const legacyEndDate = legacyDateCandidates[legacyDateCandidates.length - 1] || null;
   const startDate = [dbStartDate, legacyStartDate].filter(Boolean).sort()[0] || normalizedDocumentDate;
-  const endDate = [dbEndDate, legacyEndDate].filter(Boolean).sort().at(-1) || normalizedDocumentDate;
+  const endDate = normalizedDocumentDate;
 
   return {
     startDate,
@@ -339,19 +330,31 @@ async function buildReconciliationData({
           FROM month_uploaded_documents
           WHERE doc_kind = 'act'
         ),
-        unsigned_previous_month_act_period AS (
-          SELECT $2::DATE AS period_start, $3::DATE AS period_end
-          WHERE $4::BOOLEAN
+        generated_act_periods AS (
+          SELECT DISTINCT period_start::DATE AS period_start, period_end::DATE AS period_end
+          FROM generated_documents
+          WHERE doc_type = 'act'
+        ),
+        meal_periods AS (
+          SELECT
+            date_trunc('month', meal_date)::DATE AS period_start,
+            (date_trunc('month', meal_date) + INTERVAL '1 month - 1 day')::DATE AS period_end
+          FROM meal_entries
+          GROUP BY date_trunc('month', meal_date)
         ),
         act_periods AS (
           SELECT period_start, period_end FROM uploaded_act_periods
           UNION
-          SELECT period_start::DATE, period_end::DATE
-          FROM generated_documents
-          WHERE doc_type = 'act'
-            AND signed_file_path IS NOT NULL
+          SELECT period_start, period_end FROM generated_act_periods
           UNION
-          SELECT period_start, period_end FROM unsigned_previous_month_act_period
+          SELECT meal_periods.period_start, meal_periods.period_end
+          FROM meal_periods
+          WHERE NOT EXISTS (
+            SELECT 1
+            FROM generated_act_periods
+            WHERE generated_act_periods.period_start <= meal_periods.period_start
+              AND generated_act_periods.period_end >= meal_periods.period_end
+          )
         ),
         effective_acts AS (
           SELECT
@@ -383,12 +386,7 @@ async function buildReconciliationData({
       ) operations
       WHERE doc_date < $1
     `,
-    [
-      effectiveStartDate,
-      unsignedPreviousMonth?.startDate || null,
-      unsignedPreviousMonth?.endDate || null,
-      Boolean(unsignedPreviousMonth)
-    ]
+    [effectiveStartDate]
   );
 
   const legacyOpeningPaid = getLegacyAdvanceRows({ endDate: effectiveStartDate })
@@ -420,19 +418,31 @@ async function buildReconciliationData({
           FROM month_uploaded_documents
           WHERE doc_kind = 'act'
         ),
-        unsigned_previous_month_act_period AS (
-          SELECT $4::DATE AS period_start, $5::DATE AS period_end
-          WHERE $6::BOOLEAN
+        generated_act_periods AS (
+          SELECT DISTINCT period_start::DATE AS period_start, period_end::DATE AS period_end
+          FROM generated_documents
+          WHERE doc_type = 'act'
+        ),
+        meal_periods AS (
+          SELECT
+            date_trunc('month', meal_date)::DATE AS period_start,
+            (date_trunc('month', meal_date) + INTERVAL '1 month - 1 day')::DATE AS period_end
+          FROM meal_entries
+          GROUP BY date_trunc('month', meal_date)
         ),
         act_periods AS (
           SELECT period_start, period_end FROM uploaded_act_periods
           UNION
-          SELECT period_start::DATE, period_end::DATE
-          FROM generated_documents
-          WHERE doc_type = 'act'
-            AND signed_file_path IS NOT NULL
+          SELECT period_start, period_end FROM generated_act_periods
           UNION
-          SELECT period_start, period_end FROM unsigned_previous_month_act_period
+          SELECT meal_periods.period_start, meal_periods.period_end
+          FROM meal_periods
+          WHERE NOT EXISTS (
+            SELECT 1
+            FROM generated_act_periods
+            WHERE generated_act_periods.period_start <= meal_periods.period_start
+              AND generated_act_periods.period_end >= meal_periods.period_end
+          )
         ),
         effective_acts AS (
           SELECT
@@ -478,10 +488,7 @@ async function buildReconciliationData({
       [
         effectiveStartDate,
         effectiveEndDate,
-        legacyMaxActNumber,
-        unsignedPreviousMonth?.startDate || null,
-        unsignedPreviousMonth?.endDate || null,
-        Boolean(unsignedPreviousMonth)
+        legacyMaxActNumber
       ]
     )
   ]);

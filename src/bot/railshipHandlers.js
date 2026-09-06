@@ -679,30 +679,7 @@ function buildUnsignedPreviousMonthChoiceKeyboard(candidate) {
 }
 
 async function showReconciliationStartScreen(ctx) {
-  const candidate = await getUnsignedPreviousMonthActCandidate(todayIso());
-  if (!candidate) {
-    await showDocumentPeriodScreen(ctx, "reconciliation");
-    return;
-  }
-
-  setFlow(ctx, "doc:reconciliation:unsigned_previous_month", "choice", {
-    pendingUnsignedPreviousMonth: candidate
-  });
-
-  await renderScreen(
-    ctx,
-    buildHtmlScreen(
-      "Акт сверки",
-      `За ${monthYearLabel(candidate.month, candidate.year)} есть начисления, но подписанный акт вып. работ не загружен`,
-      [
-        lineHtml("Период", `${formatDateRu(candidate.startDate)} - ${formatDateRu(candidate.endDate)}`),
-        lineHtml("Начисления", `${formatAmount(candidate.totalAmount)} руб.`),
-        "",
-        "<u>Как формируем акт сверки?</u>"
-      ]
-    ),
-    buildUnsignedPreviousMonthChoiceKeyboard(candidate)
-  );
+  await showDocumentPeriodScreen(ctx, "reconciliation");
 }
 
 async function generateAndSendMonthlyDocumentBundle(ctx, year, month) {
@@ -716,9 +693,7 @@ async function generateAndSendMonthlyDocumentBundle(ctx, year, month) {
     userId: ctx.state.user.id
   });
   const reconciliation = await generateReconciliationDocument({
-    startDate,
-    endDate,
-    includeUnsignedPreviousMonth: true,
+    documentDate: todayIso(),
     userId: ctx.state.user.id
   });
 
