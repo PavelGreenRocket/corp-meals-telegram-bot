@@ -14,6 +14,7 @@ const userService = read("src/services/userService.js");
 const mealService = read("src/services/mealService.js");
 const botIndex = read("src/bot/index.js");
 const railshipHandlers = read("src/bot/railshipHandlers.js");
+const ledgerService = read("src/services/ledgerService.js");
 
 assertIncludes(
   userService,
@@ -52,9 +53,21 @@ mealService,
 );
 
 assertIncludes(
-railshipHandlers,
-"startDate,\n    endDate,\n    includeUnsignedPreviousMonth: true",
-"Monthly reconciliation bundle must use the selected month bounds"
+  railshipHandlers,
+  "const reconciliation = await generateReconciliationDocument({\n    documentDate: todayIso(),\n    userId: ctx.state.user.id\n  });",
+  "Monthly reconciliation bundle must cover the full settlement history through the document date"
+);
+
+assertIncludes(
+  ledgerService,
+  "meal_periods AS (",
+  "Reconciliation must include actual meal months even when an act is not signed"
+);
+
+assertIncludes(
+  ledgerService,
+  "generated_act_periods AS (",
+  "Reconciliation must include generated acts regardless of signature state"
 );
 
 console.log("Security invariant checks passed.");
