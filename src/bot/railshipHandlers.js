@@ -1242,6 +1242,9 @@ async function sendMealsSection(ctx) {
 
   if (role === USER_ROLES.OWNER || role === USER_ROLES.BARISTA) {
     rows.push([Markup.button.callback("Добавить питание", "meal:add")]);
+    if (role === USER_ROLES.OWNER) {
+      rows.push([Markup.button.callback("📎 Загрузить отчёт Excel", "meal:import_report")]);
+    }
     rows.push([
       Markup.button.callback("Текущий месяц", role === USER_ROLES.BARISTA ? "meal:list:mine" : "meal:list:month_current"),
       Markup.button.callback("Сегодня", "meal:list:today")
@@ -2797,17 +2800,21 @@ async function handleTextFlow(ctx, text) {
 async function handleDocumentUpload(ctx) {
   const flow = currentFlow(ctx);
   if (flow?.name === "monthlydocs:import" && ["document", "preview"].includes(flow.step)) {
-    const year = Number(flow.data.year);
-    const month = Number(flow.data.month);
+    const year = Number(flow.data.year || 0);
+    const month = Number(flow.data.month || 0);
+    const autoPeriod = Boolean(flow.data.autoPeriod);
+    const returnTo = flow.data.returnTo || null;
+    const backCallback = returnTo || (year && month ? `monthlydocs:review:${year}:${month}` : "nav:meals");
+    const fallbackPeriod = year && month ? `${year}_${String(month).padStart(2, "0")}` : "auto";
     const document = ctx.message.document;
-    const fileName = document.file_name || `railship_${year}_${String(month).padStart(2, "0")}.xlsx`;
+    const fileName = document.file_name || `railship_${fallbackPeriod}.xlsx`;
     const extension = path.extname(fileName).toLowerCase();
 
     if (extension !== ".xlsx") {
       await renderScreen(
         ctx,
         buildHtmlScreen("Загрузить отчёт Excel", "Нужен файл в формате .xlsx"),
-        buildRowsKeyboard([[Markup.button.callback("🔙", `monthlydocs:review:${year}:${month}`)]])
+        buildRowsKeyboard([[Markup.button.callback("🔙", backCallback)]])
       );
       return;
     }
@@ -2829,7 +2836,7 @@ async function handleDocumentUpload(ctx) {
     await ensureDir(importDir);
     const safePath = buildFilePath(
       importDir,
-      `railship_${year}_${String(month).padStart(2, "0")}_${Date.now()}.xlsx`
+      `railship_${fallbackPeriod}_${Date.now()}.xlsx`
     );
     const link = await ctx.telegram.getFileLink(document.file_id);
     await downloadFile(String(link), safePath);
@@ -2839,12 +2846,12 @@ async function handleDocumentUpload(ctx) {
       preview = await prepareRailshipReportImport({
         filePath: safePath,
         originalFileName: fileName,
-        expectedYear: year,
-        expectedMonth: month
+        expectedYear: autoPeriod ? null : year,
+        expectedMonth: autoPeriod ? null : month
       });
     } catch (error) {
       await unlinkIfExists(safePath);
-      setFlow(ctx, "monthlydocs:import", "document", { year, month });
+      setFlow(ctx, "monthlydocs:import", "document", { year, month, autoPeriod, returnTo });
       await renderScreen(
         ctx,
         buildHtmlScreen(
@@ -2859,14 +2866,16 @@ async function handleDocumentUpload(ctx) {
 
     if (!preview.canApply) {
       await unlinkIfExists(safePath);
-      setFlow(ctx, "monthlydocs:import", "document", { year, month });
+      setFlow(ctx, "monthlydocs:import", "document", { year, month, autoPeriod, returnTo });
       await showRailshipImportPreview(ctx, preview);
       return;
     }
 
     setFlow(ctx, "monthlydocs:import", "preview", {
-      year,
-      month,
+      year: preview.year,
+      month: preview.month,
+      autoPeriod,
+      returnTo,
       filePath: safePath,
       originalFileName: fileName
     });
@@ -4272,6 +4281,33 @@ function registerHandlers(bot) {
     await showMonthlyDocsReview(ctx, Number(ctx.match[1]), Number(ctx.match[2]));
   }));
 
+  bot.action("meal:import_report", withError(async (ctx) => {
+    await answerCb(ctx);
+    if (!hasDisplayedRole(ctx, USER_ROLES.OWNER)) {
+      await answerCb(ctx, "Недостаточно прав");
+      return;
+    }
+    await cleanupMonthlyImportFlow(ctx);
+    setFlow(ctx, "monthlydocs:import", "document", {
+      year: 0,
+      month: 0,
+      autoPeriod: true,
+      returnTo: "nav:meals"
+    });
+    await renderScreen(
+      ctx,
+      buildHtmlScreen(
+        "Загрузить отчёт Excel",
+        "Отправьте .xlsx отчёт Railship",
+        [
+          "Месяц будет определён автоматически по листу отчёта.",
+          "Перед записью бот покажет сотрудников, дни, сумму и изменения."
+        ]
+      ),
+      buildRowsKeyboard([[Markup.button.callback("🔙", "nav:meals")]])
+    );
+  }));
+
   bot.action(/monthlydocs:upload:(\d{4}):(\d{1,2})/, withError(async (ctx) => {
     await answerCb(ctx);
     if (!hasDisplayedRole(ctx, USER_ROLES.OWNER, USER_ROLES.CLIENT_VIEWER)) {
@@ -4352,7 +4388,12 @@ function registerHandlers(bot) {
     const flow = currentFlow(ctx);
     const year = Number(flow?.data?.year || 0);
     const month = Number(flow?.data?.month || 0);
+    const returnTo = flow?.data?.returnTo || null;
     await cleanupMonthlyImportFlow(ctx);
+    if (returnTo === "nav:meals") {
+      await sendMealsSection(ctx);
+      return;
+    }
     if (year && month) {
       await showMonthlyDocsReview(ctx, year, month);
       return;
@@ -4376,8 +4417,8 @@ function registerHandlers(bot) {
     const result = await applyRailshipReportImport({
       filePath: flow.data.filePath,
       originalFileName: flow.data.originalFileName || null,
-      expectedYear: Number(flow.data.year),
-      expectedMonth: Number(flow.data.month),
+      expectedYear: flow.data.autoPeriod ? null : Number(flow.data.year),
+      expectedMonth: flow.data.autoPeriod ? null : Number(flow.data.month),
       userId: ctx.state.user.id
     });
     const shouldGenerate = ctx.match[1] === "generate";
