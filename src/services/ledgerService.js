@@ -264,20 +264,6 @@ async function getReconciliationPeriodBounds(documentDate = todayIso(), options 
   const { rows } = await pool.query(
     `
       WITH charge_dates AS (
-        SELECT document_date::DATE AS operation_date
-        FROM generated_documents
-        WHERE doc_type = 'act'
-          AND document_date <= $1
-
-        UNION
-
-        SELECT (make_date(doc_year, doc_month, 1) + INTERVAL '1 month - 1 day')::DATE AS operation_date
-        FROM month_uploaded_documents
-        WHERE doc_kind = 'act'
-          AND (make_date(doc_year, doc_month, 1) + INTERVAL '1 month - 1 day')::DATE <= $1
-
-        UNION
-
         SELECT (date_trunc('month', meal_date) + INTERVAL '1 month - 1 day')::DATE AS operation_date
         FROM meal_entries
         WHERE meal_date <= $1
@@ -323,58 +309,28 @@ async function buildReconciliationData({
 
   const openingRows = await pool.query(
       `
-        WITH uploaded_act_periods AS (
-          SELECT
-            make_date(doc_year, doc_month, 1)::DATE AS period_start,
-            (make_date(doc_year, doc_month, 1) + INTERVAL '1 month - 1 day')::DATE AS period_end
-          FROM month_uploaded_documents
-          WHERE doc_kind = 'act'
-        ),
-        generated_act_periods AS (
-          SELECT DISTINCT period_start::DATE AS period_start, period_end::DATE AS period_end
-          FROM generated_documents
-          WHERE doc_type = 'act'
-        ),
-        meal_periods AS (
+        WITH meal_periods AS (
           SELECT
             date_trunc('month', meal_date)::DATE AS period_start,
-            (date_trunc('month', meal_date) + INTERVAL '1 month - 1 day')::DATE AS period_end
+            (date_trunc('month', meal_date) + INTERVAL '1 month - 1 day')::DATE AS period_end,
+            COALESCE(SUM(amount), 0) AS total_amount
           FROM meal_entries
           GROUP BY date_trunc('month', meal_date)
         ),
-        act_periods AS (
-          SELECT period_start, period_end FROM uploaded_act_periods
-          UNION
-          SELECT period_start, period_end FROM generated_act_periods
-          UNION
-          SELECT meal_periods.period_start, meal_periods.period_end
-          FROM meal_periods
-          WHERE NOT EXISTS (
-            SELECT 1
-            FROM generated_act_periods
-            WHERE generated_act_periods.period_start <= meal_periods.period_start
-              AND generated_act_periods.period_end >= meal_periods.period_end
-          )
-        ),
         effective_acts AS (
           SELECT
-            COALESCE(generated_act.document_date, act_periods.period_end) AS document_date,
-            COALESCE(generated_act.total_amount, meal_totals.total_amount, 0) AS total_amount
-          FROM act_periods
+            COALESCE(generated_act.document_date, meal_periods.period_end) AS document_date,
+            meal_periods.total_amount
+          FROM meal_periods
           LEFT JOIN LATERAL (
-            SELECT document_date, total_amount
+            SELECT document_date
             FROM generated_documents
             WHERE doc_type = 'act'
-              AND period_start::DATE = act_periods.period_start
-              AND period_end::DATE = act_periods.period_end
+              AND period_start::DATE = meal_periods.period_start
+              AND period_end::DATE = meal_periods.period_end
             ORDER BY signed_file_path IS NOT NULL DESC, uploaded_signed_at DESC NULLS LAST, id DESC
             LIMIT 1
           ) generated_act ON TRUE
-          LEFT JOIN LATERAL (
-            SELECT COALESCE(SUM(amount), 0) AS total_amount
-            FROM meal_entries
-            WHERE meal_date BETWEEN act_periods.period_start AND act_periods.period_end
-          ) meal_totals ON TRUE
         )
       SELECT COALESCE(SUM(paid_delta - charged_delta), 0) AS opening_balance
       FROM (
@@ -411,74 +367,43 @@ async function buildReconciliationData({
     ),
     pool.query(
       `
-        WITH uploaded_act_periods AS (
-          SELECT
-            make_date(doc_year, doc_month, 1)::DATE AS period_start,
-            (make_date(doc_year, doc_month, 1) + INTERVAL '1 month - 1 day')::DATE AS period_end
-          FROM month_uploaded_documents
-          WHERE doc_kind = 'act'
-        ),
-        generated_act_periods AS (
-          SELECT DISTINCT period_start::DATE AS period_start, period_end::DATE AS period_end
-          FROM generated_documents
-          WHERE doc_type = 'act'
-        ),
-        meal_periods AS (
+        WITH meal_periods AS (
           SELECT
             date_trunc('month', meal_date)::DATE AS period_start,
-            (date_trunc('month', meal_date) + INTERVAL '1 month - 1 day')::DATE AS period_end
+            (date_trunc('month', meal_date) + INTERVAL '1 month - 1 day')::DATE AS period_end,
+            COALESCE(SUM(amount), 0) AS total_amount
           FROM meal_entries
           GROUP BY date_trunc('month', meal_date)
         ),
-        act_periods AS (
-          SELECT period_start, period_end FROM uploaded_act_periods
-          UNION
-          SELECT period_start, period_end FROM generated_act_periods
-          UNION
-          SELECT meal_periods.period_start, meal_periods.period_end
-          FROM meal_periods
-          WHERE NOT EXISTS (
-            SELECT 1
-            FROM generated_act_periods
-            WHERE generated_act_periods.period_start <= meal_periods.period_start
-              AND generated_act_periods.period_end >= meal_periods.period_end
-          )
-        ),
         effective_acts AS (
           SELECT
-            COALESCE(signed_acts.document_date, act_periods.period_end) AS document_date,
+            COALESCE(generated_act.document_date, meal_periods.period_end) AS document_date,
             canonical_numbers.document_number,
-            COALESCE(signed_acts.total_amount, meal_totals.total_amount, 0) AS total_amount,
-            act_periods.period_start,
-            act_periods.period_end
-          FROM act_periods
+            meal_periods.total_amount,
+            meal_periods.period_start,
+            meal_periods.period_end
+          FROM meal_periods
           LEFT JOIN LATERAL (
-            SELECT document_date, total_amount
+            SELECT document_date
             FROM generated_documents
             WHERE doc_type = 'act'
-              AND period_start::DATE = act_periods.period_start
-              AND period_end::DATE = act_periods.period_end
+              AND period_start::DATE = meal_periods.period_start
+              AND period_end::DATE = meal_periods.period_end
             ORDER BY signed_file_path IS NOT NULL DESC, uploaded_signed_at DESC NULLS LAST, id DESC
             LIMIT 1
-          ) signed_acts ON TRUE
+          ) generated_act ON TRUE
           LEFT JOIN LATERAL (
-            SELECT DISTINCT ON (period_start::DATE, period_end::DATE)
-              document_number,
-              period_start::DATE AS period_start,
-              period_end::DATE AS period_end
+            SELECT document_number
             FROM generated_documents
             WHERE doc_type = 'act'
-              AND document_number ~ '^[0-9]+$'
+              AND period_start::DATE = meal_periods.period_start
+              AND period_end::DATE = meal_periods.period_end
+              AND document_number <> ''
+              AND document_number !~ '[^0-9]'
               AND document_number::BIGINT > $3
-            ORDER BY period_start::DATE, period_end::DATE, document_number::BIGINT ASC, id ASC
-          ) canonical_numbers
-          ON canonical_numbers.period_start = act_periods.period_start
-            AND canonical_numbers.period_end = act_periods.period_end
-          LEFT JOIN LATERAL (
-            SELECT COALESCE(SUM(amount), 0) AS total_amount
-            FROM meal_entries
-            WHERE meal_date BETWEEN act_periods.period_start AND act_periods.period_end
-          ) meal_totals ON TRUE
+            ORDER BY document_number::BIGINT ASC, id ASC
+            LIMIT 1
+          ) canonical_numbers ON TRUE
         )
         SELECT document_date, document_number, total_amount, period_start, period_end
         FROM effective_acts

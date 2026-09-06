@@ -61,13 +61,17 @@ assertIncludes(
 assertIncludes(
   ledgerService,
   "meal_periods AS (",
-  "Reconciliation must include actual meal months even when an act is not signed"
+  "Reconciliation must use actual meal months as the charge source"
 );
 
 assertIncludes(
   ledgerService,
-  "generated_act_periods AS (",
-  "Reconciliation must include generated acts regardless of signature state"
+  "COALESCE(generated_act.document_date, meal_periods.period_end) AS document_date",
+  "Generated acts may provide metadata only for the exact meal month"
 );
+
+if (ledgerService.includes("generated_act_periods AS (")) {
+  throw new Error("Generated documents must not create reconciliation charges by themselves");
+}
 
 console.log("Security invariant checks passed.");
