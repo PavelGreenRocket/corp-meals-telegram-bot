@@ -34,12 +34,10 @@ async function sendReminderIfNeeded(bot, options = {}) {
   const periodLabel = monthYearLabel(previousMonth.month, previousMonth.year);
   const text = [
     `Прошёл месяц: ${periodLabel}.`,
-    "Сформировать акт выполненных работ и акт сверки?",
-    "",
-    "Акт сверки будет сформирован с учётом этого неподписанного месяца."
+    "Перед формированием документов проверим, что данные о питании за месяц заполнены и подтверждены."
   ].join("\n");
   const keyboard = Markup.inlineKeyboard([
-    [Markup.button.callback("Да, сформировать оба акта", `monthlydocs:generate:${previousMonth.year}:${previousMonth.month}`)],
+    [Markup.button.callback("Проверить данные и документы", `monthlydocs:review:${previousMonth.year}:${previousMonth.month}`)],
     [Markup.button.callback("Не сейчас", "monthlydocs:dismiss")]
   ]);
 

@@ -2,6 +2,7 @@ const pool = require("../db/pool");
 const { DAILY_LIMIT } = require("../constants");
 const { getMonthRange } = require("../utils/dateHelpers");
 const { getLegacyActSummary } = require("./legacySettlementService");
+const { ensureMealMonthStateSchema, invalidateMealMonthConfirmationByDate } = require("./mealMonthService");
 
 async function lockEmployeeMealDay(db, employeeId, mealDate) {
   const lockKey = `meal-limit:${employeeId}:${mealDate}`;
@@ -55,6 +56,7 @@ async function createMealEntry({
   comment = null,
   createdByUserId = null
 }) {
+  await ensureMealMonthStateSchema();
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -72,6 +74,7 @@ async function createMealEntry({
       [mealDate, employeeId, amount, comment, createdByUserId]
     );
 
+    await invalidateMealMonthConfirmationByDate(mealDate, client);
     await client.query("COMMIT");
     return rows[0];
   } catch (error) {
@@ -103,9 +106,14 @@ async function updateMealEntry(
   mealId,
   { mealDate, employeeId, amount, comment = null, updatedByUserId = null }
 ) {
+  await ensureMealMonthStateSchema();
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
+    const { rows: previousRows } = await client.query(
+      "SELECT meal_date::TEXT AS meal_date FROM meal_entries WHERE id = $1 FOR UPDATE",
+      [mealId]
+    );
     await lockEmployeeMealDay(client, employeeId, mealDate);
     await assertDailyLimit(employeeId, mealDate, amount, mealId, client);
 
@@ -124,6 +132,10 @@ async function updateMealEntry(
       [mealId, mealDate, employeeId, amount, comment, updatedByUserId]
     );
 
+    if (previousRows[0]?.meal_date) {
+      await invalidateMealMonthConfirmationByDate(previousRows[0].meal_date, client);
+    }
+    await invalidateMealMonthConfirmationByDate(mealDate, client);
     await client.query("COMMIT");
     return rows[0] || null;
   } catch (error) {
@@ -135,8 +147,22 @@ async function updateMealEntry(
 }
 
 async function deleteMealEntry(mealId) {
-  const { rows } = await pool.query("DELETE FROM meal_entries WHERE id = $1 RETURNING *", [mealId]);
-  return rows[0] || null;
+  await ensureMealMonthStateSchema();
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const { rows } = await client.query("DELETE FROM meal_entries WHERE id = $1 RETURNING *", [mealId]);
+    if (rows[0]?.meal_date) {
+      await invalidateMealMonthConfirmationByDate(rows[0].meal_date, client);
+    }
+    await client.query("COMMIT");
+    return rows[0] || null;
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 async function listMealEntries({

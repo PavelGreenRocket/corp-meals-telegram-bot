@@ -25,6 +25,8 @@ const {
   getYearlyMonthlyTotals
 } = require("../services/ledgerService");
 const { createMealEntry, deleteMealEntry, getEmployeeSpentForDate, getMealEntryById, getMealSummary, listMealEntries, updateMealEntry } = require("../services/mealService");
+const { confirmMealMonthManually, getMealMonthState } = require("../services/mealMonthService");
+const { applyRailshipReportImport, prepareRailshipReportImport } = require("../services/railshipReportImportService");
 const { deleteMonthUploadedDocument, getMonthUploadedDocument } = require("../services/monthDocumentService");
 const { sendReminderIfNeeded } = require("../services/monthlyDocumentReminderService");
 const {
@@ -719,6 +721,171 @@ async function generateAndSendMonthlyDocumentBundle(ctx, year, month) {
 
   await sendDocumentFile(ctx, act.id, false, { month, year });
   await sendDocumentFile(ctx, reconciliation.id, false, { month, year });
+}
+
+function buildMonthlyDocsStatusLabel(state) {
+  if (state.isConfirmed) {
+    return state.sourceType === "excel" ? "подтверждён отчётом Excel" : "подтверждён вручную";
+  }
+  return state.status === "draft" ? "есть данные, не подтверждены" : "данных пока нет";
+}
+
+function buildMonthlyDocsReviewKeyboard(ctx, state, year, month) {
+  const rows = [];
+  if (state.isConfirmed) {
+    rows.push([
+      Markup.button.callback("📄 Сформировать акт и сверку", `monthlydocs:generate:${year}:${month}`)
+    ]);
+  }
+
+  rows.push([
+    Markup.button.callback("📎 Загрузить отчёт Excel", `monthlydocs:upload:${year}:${month}`)
+  ]);
+
+  if (getDisplayedRole(ctx) === USER_ROLES.OWNER) {
+    rows.push([
+      Markup.button.callback("✍️ Заполнить вручную", `monthlydocs:manual:${year}:${month}`)
+    ]);
+  }
+
+  rows.push([Markup.button.callback("Не сейчас", "monthlydocs:dismiss")]);
+  return buildRowsKeyboard(rows);
+}
+
+async function showMonthlyDocsReview(ctx, year, month, notice = null) {
+  const state = await getMealMonthState(year, month);
+  const lines = [];
+  if (notice) {
+    lines.push(`<b>${escapeHtml(notice)}</b>`, "");
+  }
+  lines.push(
+    lineHtml("Период", monthYearLabel(month, year)),
+    lineHtml("Статус", buildMonthlyDocsStatusLabel(state)),
+    lineHtml("Дней питания", state.daysCount),
+    `<b>Сумма:</b> ${moneyHtml(state.totalAmount)} руб.`
+  );
+  if (state.sourceType === "excel" && state.originalFileName) {
+    lines.push(lineHtml("Источник", state.originalFileName));
+  }
+
+  await renderScreen(
+    ctx,
+    buildHtmlScreen(
+      "Закрытие месяца",
+      state.isConfirmed
+        ? "Данные готовы для формирования документов"
+        : "Перед формированием документов подтвердите данные о питании",
+      lines
+    ),
+    buildMonthlyDocsReviewKeyboard(ctx, state, year, month)
+  );
+}
+
+async function showMonthlyDocsManualScreen(ctx, year, month) {
+  const state = await getMealMonthState(year, month);
+  await renderScreen(
+    ctx,
+    buildHtmlScreen(
+      `Питание за ${monthYearLabel(month, year)}`,
+      "Внесите недостающие записи, затем подтвердите, что месяц заполнен полностью",
+      [
+        lineHtml("Дней питания сейчас", state.daysCount),
+        `<b>Сумма сейчас:</b> ${moneyHtml(state.totalAmount)} руб.`
+      ]
+    ),
+    buildRowsKeyboard([
+      [Markup.button.callback("➕ Добавить питание", `monthlydocs:manual:add:${year}:${month}`)],
+      [Markup.button.callback("✅ Данные внесены полностью", `monthlydocs:confirmmanual:${year}:${month}`)],
+      [Markup.button.callback("📎 Загрузить отчёт Excel", `monthlydocs:upload:${year}:${month}`)],
+      [Markup.button.callback("🔙", `monthlydocs:review:${year}:${month}`)]
+    ])
+  );
+}
+
+function buildRailshipImportPreviewLines(preview) {
+  const lines = [
+    lineHtml("Период", monthYearLabel(preview.month, preview.year)),
+    lineHtml("Сотрудников", preview.summary.employeeCount),
+    lineHtml("Дней питания", preview.summary.totalDays),
+    `<b>Сумма:</b> ${moneyHtml(preview.summary.totalAmount)} руб.`,
+    "",
+    `<b>Синхронизация:</b> +${preview.diff.toAdd} · =${preview.diff.unchanged} · ~${preview.diff.toReplace} · −${preview.diff.toRemove}`
+  ];
+
+  if (preview.summary.newEmployeeCount) {
+    lines.push(lineHtml("Новых сотрудников", preview.summary.newEmployeeCount));
+  }
+  if (preview.summary.linkedNumberCount) {
+    lines.push(lineHtml("Будет привязано табельных №", preview.summary.linkedNumberCount));
+  }
+
+  lines.push("");
+  const shown = preview.employees.slice(0, 8);
+  for (const employee of shown) {
+    const flags = [];
+    if (employee.willCreateEmployee) {
+      flags.push("новый сотрудник");
+    } else if (employee.willLinkEmployeeNumber) {
+      flags.push("привяжется табельный №");
+    }
+    const suffix = flags.length ? ` · ${flags.join(", ")}` : "";
+    lines.push(
+      `<b>${escapeHtml(employee.employeeName)}</b> — ${employee.daysCount} дн. · ${moneyHtml(employee.amount)} руб.${escapeHtml(suffix)}`
+    );
+    lines.push(`<code>${escapeHtml(employee.mealDays.join(", ") || "нет питания")}</code>`);
+  }
+  if (preview.employees.length > shown.length) {
+    lines.push(`<i>Ещё сотрудников: ${preview.employees.length - shown.length}</i>`);
+  }
+
+  if (preview.warnings.length) {
+    lines.push("", "<b>Предупреждения:</b>");
+    preview.warnings.slice(0, 4).forEach((warning) => lines.push(`• ${escapeHtml(warning)}`));
+  }
+  if (preview.errors.length) {
+    lines.push("", "<b>Ошибки:</b>");
+    preview.errors.slice(0, 6).forEach((error) => lines.push(`• ${escapeHtml(error)}`));
+    if (preview.errors.length > 6) {
+      lines.push(`• … ещё ${preview.errors.length - 6}`);
+    }
+  }
+
+  return lines;
+}
+
+async function showRailshipImportPreview(ctx, preview) {
+  const rows = [];
+  if (preview.canApply) {
+    rows.push([
+      Markup.button.callback("✅ Принять и сформировать документы", "monthlydocs:import:apply:generate")
+    ]);
+    rows.push([
+      Markup.button.callback("💾 Только принять данные", "monthlydocs:import:apply:save")
+    ]);
+  }
+  rows.push([Markup.button.callback("❌ Отмена", "monthlydocs:import:cancel")]);
+
+  await renderScreen(
+    ctx,
+    buildHtmlScreen(
+      preview.canApply ? "Данные для вставки готовы" : "Отчёт требует исправления",
+      preview.canApply
+        ? "Проверьте данные перед синхронизацией месяца"
+        : "Исправьте ошибки в Excel и отправьте файл заново",
+      buildRailshipImportPreviewLines(preview)
+    ),
+    buildRowsKeyboard(rows)
+  );
+}
+
+async function cleanupMonthlyImportFlow(ctx) {
+  const flow = currentFlow(ctx);
+  if (flow?.name === "monthlydocs:import" && flow.data?.filePath) {
+    await unlinkIfExists(flow.data.filePath);
+  }
+  ensureSession(ctx);
+  ctx.session.monthlyDocsReturn = null;
+  clearFlow(ctx);
 }
 
 async function showDocumentPeriodScreen(ctx, kind, state = null) {
@@ -2219,6 +2386,14 @@ async function saveMealFromFlow(ctx, flow, amount) {
   }));
 
   clearFlow(ctx);
+  const monthlyDocsReturn = ctx.session?.monthlyDocsReturn || null;
+  if (ctx.session) {
+    ctx.session.monthlyDocsReturn = null;
+  }
+  if (monthlyDocsReturn?.year && monthlyDocsReturn?.month) {
+    await showMonthlyDocsManualScreen(ctx, Number(monthlyDocsReturn.year), Number(monthlyDocsReturn.month));
+    return;
+  }
   await sendMainMenu(ctx, "Питание добавлено.");
 }
 
@@ -2621,6 +2796,84 @@ async function handleTextFlow(ctx, text) {
 
 async function handleDocumentUpload(ctx) {
   const flow = currentFlow(ctx);
+  if (flow?.name === "monthlydocs:import" && ["document", "preview"].includes(flow.step)) {
+    const year = Number(flow.data.year);
+    const month = Number(flow.data.month);
+    const document = ctx.message.document;
+    const fileName = document.file_name || `railship_${year}_${String(month).padStart(2, "0")}.xlsx`;
+    const extension = path.extname(fileName).toLowerCase();
+
+    if (extension !== ".xlsx") {
+      await renderScreen(
+        ctx,
+        buildHtmlScreen("Загрузить отчёт Excel", "Нужен файл в формате .xlsx"),
+        buildRowsKeyboard([[Markup.button.callback("🔙", `monthlydocs:review:${year}:${month}`)]])
+      );
+      return;
+    }
+
+    if (Number(document.file_size || 0) > 10 * 1024 * 1024) {
+      await renderScreen(
+        ctx,
+        buildHtmlScreen("Загрузить отчёт Excel", "Файл больше 10 МБ. Отправьте исходный отчёт без лишних вложений"),
+        buildRowsKeyboard([[Markup.button.callback("🔙", `monthlydocs:review:${year}:${month}`)]])
+      );
+      return;
+    }
+
+    if (flow.data.filePath) {
+      await unlinkIfExists(flow.data.filePath);
+    }
+
+    const importDir = path.join(config.generatedDir, "month-imports");
+    await ensureDir(importDir);
+    const safePath = buildFilePath(
+      importDir,
+      `railship_${year}_${String(month).padStart(2, "0")}_${Date.now()}.xlsx`
+    );
+    const link = await ctx.telegram.getFileLink(document.file_id);
+    await downloadFile(String(link), safePath);
+
+    let preview;
+    try {
+      preview = await prepareRailshipReportImport({
+        filePath: safePath,
+        originalFileName: fileName,
+        expectedYear: year,
+        expectedMonth: month
+      });
+    } catch (error) {
+      await unlinkIfExists(safePath);
+      setFlow(ctx, "monthlydocs:import", "document", { year, month });
+      await renderScreen(
+        ctx,
+        buildHtmlScreen(
+          "Не удалось прочитать отчёт",
+          "Отправьте исправленный .xlsx файл",
+          [escapeHtml(error.message)]
+        ),
+        buildRowsKeyboard([[Markup.button.callback("🔙", `monthlydocs:review:${year}:${month}`)]])
+      );
+      return;
+    }
+
+    if (!preview.canApply) {
+      await unlinkIfExists(safePath);
+      setFlow(ctx, "monthlydocs:import", "document", { year, month });
+      await showRailshipImportPreview(ctx, preview);
+      return;
+    }
+
+    setFlow(ctx, "monthlydocs:import", "preview", {
+      year,
+      month,
+      filePath: safePath,
+      originalFileName: fileName
+    });
+    await showRailshipImportPreview(ctx, preview);
+    return;
+  }
+
   if (flow?.name === "advance:add" && flow.step === "document") {
     if (!flow.data.paymentDate || !flow.data.amount) {
       clearFlow(ctx);
@@ -3572,6 +3825,8 @@ function registerHandlers(bot) {
 
   bot.action("meal:add", withError(async (ctx) => {
     await answerCb(ctx);
+    ensureSession(ctx);
+    ctx.session.monthlyDocsReturn = null;
     if (!hasDisplayedRole(ctx, USER_ROLES.OWNER, USER_ROLES.BARISTA)) {
       await answerCb(ctx, "Недостаточно прав");
       return;
@@ -4007,6 +4262,139 @@ function registerHandlers(bot) {
     await showDocumentPeriodScreen(ctx, "act");
   }));
 
+  bot.action(/monthlydocs:review:(\d{4}):(\d{1,2})/, withError(async (ctx) => {
+    await answerCb(ctx);
+    if (!hasDisplayedRole(ctx, USER_ROLES.OWNER, USER_ROLES.CLIENT_VIEWER)) {
+      await answerCb(ctx, "Недостаточно прав");
+      return;
+    }
+    await cleanupMonthlyImportFlow(ctx);
+    await showMonthlyDocsReview(ctx, Number(ctx.match[1]), Number(ctx.match[2]));
+  }));
+
+  bot.action(/monthlydocs:upload:(\d{4}):(\d{1,2})/, withError(async (ctx) => {
+    await answerCb(ctx);
+    if (!hasDisplayedRole(ctx, USER_ROLES.OWNER, USER_ROLES.CLIENT_VIEWER)) {
+      await answerCb(ctx, "Недостаточно прав");
+      return;
+    }
+    const year = Number(ctx.match[1]);
+    const month = Number(ctx.match[2]);
+    await cleanupMonthlyImportFlow(ctx);
+    setFlow(ctx, "monthlydocs:import", "document", { year, month });
+    await renderScreen(
+      ctx,
+      buildHtmlScreen(
+        "Загрузить отчёт Excel",
+        `Отправьте .xlsx отчёт Railship за ${monthYearLabel(month, year)}`,
+        ["Бот проверит сотрудников, дни питания и покажет изменения до записи в учёт."]
+      ),
+      buildRowsKeyboard([[Markup.button.callback("🔙", `monthlydocs:review:${year}:${month}`)]])
+    );
+  }));
+
+  bot.action(/monthlydocs:manual:(\d{4}):(\d{1,2})/, withError(async (ctx) => {
+    await answerCb(ctx);
+    if (!hasDisplayedRole(ctx, USER_ROLES.OWNER)) {
+      await answerCb(ctx, "Ручной ввод доступен owner");
+      return;
+    }
+    await cleanupMonthlyImportFlow(ctx);
+    await showMonthlyDocsManualScreen(ctx, Number(ctx.match[1]), Number(ctx.match[2]));
+  }));
+
+  bot.action(/monthlydocs:manual:add:(\d{4}):(\d{1,2})/, withError(async (ctx) => {
+    await answerCb(ctx);
+    if (!hasDisplayedRole(ctx, USER_ROLES.OWNER)) {
+      await answerCb(ctx, "Ручной ввод доступен owner");
+      return;
+    }
+
+    const year = Number(ctx.match[1]);
+    const month = Number(ctx.match[2]);
+    ensureSession(ctx);
+    ctx.session.monthlyDocsReturn = { year, month };
+    const recent = await listRecentEmployees(4);
+    const all = await listEmployees({ activeOnly: true, limit: PAGE_SIZE, offset: 0 });
+    const merged = [...recent, ...all.filter((employee) => !recent.some((item) => item.id === employee.id))].slice(0, PAGE_SIZE);
+
+    setFlow(ctx, "meal:add_pick_employee", "pick", {});
+    await renderScreen(
+      ctx,
+      buildHtmlScreen("Добавить питание", `Ручное заполнение за ${monthYearLabel(month, year)}`),
+      buildPagedKeyboard(
+        merged,
+        (employee) => employee.full_name,
+        "meal:pickemployee",
+        0,
+        false,
+        [],
+        `monthlydocs:manual:${year}:${month}`
+      )
+    );
+  }));
+
+  bot.action(/monthlydocs:confirmmanual:(\d{4}):(\d{1,2})/, withError(async (ctx) => {
+    await answerCb(ctx);
+    if (!hasDisplayedRole(ctx, USER_ROLES.OWNER)) {
+      await answerCb(ctx, "Недостаточно прав");
+      return;
+    }
+    const year = Number(ctx.match[1]);
+    const month = Number(ctx.match[2]);
+    await confirmMealMonthManually({ year, month, userId: ctx.state.user.id });
+    clearFlow(ctx);
+    await showMonthlyDocsReview(ctx, year, month, "Месяц подтверждён вручную");
+  }));
+
+  bot.action("monthlydocs:import:cancel", withError(async (ctx) => {
+    await answerCb(ctx);
+    const flow = currentFlow(ctx);
+    const year = Number(flow?.data?.year || 0);
+    const month = Number(flow?.data?.month || 0);
+    await cleanupMonthlyImportFlow(ctx);
+    if (year && month) {
+      await showMonthlyDocsReview(ctx, year, month);
+      return;
+    }
+    await sendMainMenu(ctx);
+  }));
+
+  bot.action(/monthlydocs:import:apply:(generate|save)/, withError(async (ctx) => {
+    await answerCb(ctx);
+    if (!hasDisplayedRole(ctx, USER_ROLES.OWNER, USER_ROLES.CLIENT_VIEWER)) {
+      await answerCb(ctx, "Недостаточно прав");
+      return;
+    }
+
+    const flow = currentFlow(ctx);
+    if (!flow || flow.name !== "monthlydocs:import" || flow.step !== "preview" || !flow.data?.filePath) {
+      await answerCb(ctx, "Загрузите отчёт заново");
+      return;
+    }
+
+    const result = await applyRailshipReportImport({
+      filePath: flow.data.filePath,
+      originalFileName: flow.data.originalFileName || null,
+      expectedYear: Number(flow.data.year),
+      expectedMonth: Number(flow.data.month),
+      userId: ctx.state.user.id
+    });
+    const shouldGenerate = ctx.match[1] === "generate";
+    const year = result.year;
+    const month = result.month;
+    clearFlow(ctx);
+
+    if (shouldGenerate) {
+      await generateAndSendMonthlyDocumentBundle(ctx, year, month);
+      await showMonthlyDocsReview(ctx, year, month, "Данные приняты, документы сформированы");
+      return;
+    }
+
+    await showMonthlyDocsReview(ctx, year, month, "Данные из Excel приняты");
+  }));
+
+
   bot.action(/monthlydocs:generate:(\d{4}):(\d{1,2})/, withError(async (ctx) => {
     await answerCb(ctx);
     if (!hasDisplayedRole(ctx, USER_ROLES.OWNER, USER_ROLES.CLIENT_VIEWER)) {
@@ -4016,7 +4404,14 @@ function registerHandlers(bot) {
 
     const year = Number(ctx.match[1]);
     const month = Number(ctx.match[2]);
+    const state = await getMealMonthState(year, month);
+    if (!state.isConfirmed) {
+      await showMonthlyDocsReview(ctx, year, month, "Сначала подтвердите данные за месяц");
+      return;
+    }
+
     await generateAndSendMonthlyDocumentBundle(ctx, year, month);
+    await showMonthlyDocsReview(ctx, year, month, "Документы сформированы");
   }));
 
   bot.action("monthlydocs:dismiss", withError(async (ctx) => {

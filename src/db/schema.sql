@@ -7,6 +7,9 @@ CREATE TABLE IF NOT EXISTS employees (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+ALTER TABLE employees
+  ADD COLUMN IF NOT EXISTS external_employee_number TEXT;
+
 CREATE TABLE IF NOT EXISTS app_users (
   id BIGSERIAL PRIMARY KEY,
   telegram_id BIGINT NOT NULL UNIQUE,
@@ -46,6 +49,24 @@ CREATE TABLE IF NOT EXISTS meal_entries (
   updated_by_user_id BIGINT REFERENCES app_users(id) ON DELETE SET NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS meal_month_closures (
+  id BIGSERIAL PRIMARY KEY,
+  close_year INTEGER NOT NULL CHECK (close_year >= 2000),
+  close_month SMALLINT NOT NULL CHECK (close_month BETWEEN 1 AND 12),
+  status VARCHAR(20) NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'confirmed')),
+  source_type VARCHAR(20) CHECK (source_type IS NULL OR source_type IN ('manual', 'excel')),
+  source_file_path TEXT,
+  original_file_name TEXT,
+  source_file_sha256 TEXT,
+  total_days INTEGER NOT NULL DEFAULT 0 CHECK (total_days >= 0),
+  total_amount NUMERIC(14, 2) NOT NULL DEFAULT 0 CHECK (total_amount >= 0),
+  confirmed_by_user_id BIGINT REFERENCES app_users(id) ON DELETE SET NULL,
+  confirmed_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (close_year, close_month)
 );
 
 CREATE TABLE IF NOT EXISTS app_settings (
@@ -97,6 +118,11 @@ CREATE TABLE IF NOT EXISTS month_uploaded_documents (
 CREATE INDEX IF NOT EXISTS idx_app_users_role ON app_users(role);
 CREATE INDEX IF NOT EXISTS idx_app_users_company ON app_users(company);
 CREATE INDEX IF NOT EXISTS idx_employees_active ON employees(is_active);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_employees_external_number_unique
+  ON employees(external_employee_number)
+  WHERE external_employee_number IS NOT NULL AND BTRIM(external_employee_number) <> '';
+CREATE INDEX IF NOT EXISTS idx_meal_month_closures_period ON meal_month_closures(close_year, close_month);
+
 CREATE INDEX IF NOT EXISTS idx_advances_date ON advances(payment_date DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_meal_entries_employee_date ON meal_entries(employee_id, meal_date DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_meal_entries_date ON meal_entries(meal_date DESC, id DESC);
